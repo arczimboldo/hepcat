@@ -5,6 +5,8 @@
 *A cool cat for your audio.* A Voicemeeter-style mixer for PipeWire with a
 native KDE Plasma look.
 
+![Hepcat's mixer: inputs and apps sent to the Main and Mic buses](screenshots/mixer.png)
+
 ## Install
 
 Hepcat needs a desktop with PipeWire, which is the default on most current
@@ -73,6 +75,8 @@ Instead of a node graph, Hepcat shows mixer strips:
   - **Tone:** bass, presence and treble.
   - **Voice changer:** pitch shift plus robot, alien, radio, telephone,
     megaphone, underwater, echo and hall effects, with a wet/dry mix.
+
+![The effects dialog for scrcpy](screenshots/effects.png)
 
 Closing the window keeps Hepcat running in the **system tray**, so rules keep
 being applied (for example when headphones reconnect). Use "Start at Login" in

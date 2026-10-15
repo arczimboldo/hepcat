@@ -47,6 +47,16 @@
     <control>pointing</control>
     <control>keyboard</control>
   </supports>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Apps and inputs sent to buses, each with a fader and level meter</caption>
+      <image>https://raw.githubusercontent.com/arczimboldo/hepcat/main/screenshots/mixer.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Effects for an app: noise suppression, echo cancellation, gain, tone and a voice changer</caption>
+      <image>https://raw.githubusercontent.com/arczimboldo/hepcat/main/screenshots/effects.png</image>
+    </screenshot>
+  </screenshots>
   <releases>
     <release version="0.1.1" date="2026-10-15">
       <description>
