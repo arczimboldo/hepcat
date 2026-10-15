@@ -26,8 +26,8 @@ makedepends=('cargo' 'clang' 'pkgconf')
 options=('!lto')
 install=hepcat.install
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-# Run `updpkgsums` after tagging the release on GitHub.
-sha256sums=('SKIP')
+# For a new release: set pkgver, then run `updpkgsums`.
+sha256sums=('0dd5eee858d785b48ac8ab9a46c72436bcb9547209253edc91fd59d78dd881fd')
 
 prepare() {
   cd "$pkgname-$pkgver"

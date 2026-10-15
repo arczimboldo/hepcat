@@ -24,6 +24,6 @@ pkgbase = hepcat
 	depends = wireplumber
 	options = !lto
 	source = hepcat-0.1.0.tar.gz::https://github.com/arczimboldo/hepcat/archive/refs/tags/v0.1.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = 0dd5eee858d785b48ac8ab9a46c72436bcb9547209253edc91fd59d78dd881fd
 
 pkgname = hepcat
