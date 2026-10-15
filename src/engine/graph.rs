@@ -4,8 +4,9 @@
 //!
 //! Nothing in here talks to PipeWire, which keeps the routing rules testable.
 
+use super::fx::{FX_IN_PREFIX, FX_OUT_PREFIX, FX_PREFIX, FX_REF_PREFIX, FxNames};
 use super::meter::METER_PREFIX;
-use crate::config::{BUS_PREFIX, Config, MIC_PREFIX};
+use crate::config::{BUS_PREFIX, Config, FxTarget, MIC_PREFIX};
 
 /// Node names used by earlier builds, when the app was called Mixwire.
 pub const LEGACY_PREFIX: &str = "mixwire.";
@@ -25,6 +26,15 @@ pub enum Kind {
     Meter,
     /// A virtual microphone fed by one of our buses.
     BusMic,
+    /// The virtual device of a mic or app with effects: the processed
+    /// microphone, or the output the app plays into ("… (Hepcat FX)").
+    FxDevice,
+    /// Our stream that captures the audio to process.
+    FxIn,
+    /// Our stream that captures the speakers for echo cancellation.
+    FxRef,
+    /// Our stream that plays the processed audio.
+    FxOut,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -38,9 +48,14 @@ pub struct NodeInfo {
     pub binary: Option<String>,
     pub icon: Option<String>,
     pub media_name: Option<String>,
-    /// Volume on the cubic scale used by wpctl and desktop volume sliders.
+    /// Volume on the cubic scale used by desktop volume sliders.
     pub volume: f32,
     pub mute: bool,
+    /// Number of channels in the node's volume.
+    pub channels: usize,
+    /// For hardware nodes: the device and its `card.profile.device`, which
+    /// address the route that carries the real volume.
+    pub device: Option<(u32, i32)>,
 }
 
 impl NodeInfo {
@@ -53,6 +68,18 @@ impl NodeInfo {
         }
         if self.name.starts_with(MIC_PREFIX) {
             return Some(Kind::BusMic);
+        }
+        if self.name.starts_with(FX_PREFIX) {
+            return Some(Kind::FxDevice);
+        }
+        if self.name.starts_with(FX_IN_PREFIX) {
+            return Some(Kind::FxIn);
+        }
+        if self.name.starts_with(FX_REF_PREFIX) {
+            return Some(Kind::FxRef);
+        }
+        if self.name.starts_with(FX_OUT_PREFIX) {
+            return Some(Kind::FxOut);
         }
         match self.media_class.as_str() {
             "Stream/Output/Audio" if !self.name.starts_with("hepcat") => Some(Kind::App),
@@ -155,8 +182,20 @@ pub struct Graph {
     pub links: BTreeMap<u32, LinkInfo>,
     /// node.name of the current default sink.
     pub default_sink: Option<String>,
+    /// node.name of the current default source.
+    pub default_source: Option<String>,
     /// Stream node id -> `target.object` from the default metadata (a serial or node.name).
     pub stream_targets: HashMap<u32, String>,
+}
+
+/// The nodes making up one strip's effects; any may still be missing while
+/// they start up.
+#[derive(Debug, Clone, Copy)]
+pub struct FxNodes<'a> {
+    pub device: Option<&'a NodeInfo>,
+    pub input: Option<&'a NodeInfo>,
+    pub output: Option<&'a NodeInfo>,
+    pub reference: Option<&'a NodeInfo>,
 }
 
 /// What the reconciler wants changed in the graph.
@@ -183,6 +222,38 @@ impl Graph {
         }
     }
 
+    /// The running nodes of the effects of strip `key`, if they are on.
+    pub fn fx(&self, config: &Config, key: &str) -> Option<FxNodes<'_>> {
+        config.active_fx(key)?;
+        let names = FxNames::new(key);
+        Some(FxNodes {
+            device: self.node_by_name(&names.device),
+            input: self.node_by_name(&names.input),
+            output: self.node_by_name(&names.output),
+            reference: self.node_by_name(&names.reference),
+        })
+    }
+
+    /// The hardware device a bus plays to.
+    fn bus_output(&self, config: &Config, bus: &NodeInfo) -> Option<&NodeInfo> {
+        bus.bus_name()
+            .and_then(|b| config.bus(b))
+            .and_then(|b| b.output.as_deref())
+            .and_then(|name| self.node_by_name(name))
+            .filter(|n| n.kind() == Some(Kind::Output))
+    }
+
+    /// The device whose sound echo cancellation should remove: the hardware
+    /// output new apps play to. When that is a bus, its own output, because
+    /// that also carries every other bus playing to the same speakers.
+    pub fn echo_reference(&self, config: &Config) -> Option<&NodeInfo> {
+        let default = self.node_by_name(self.default_sink.as_deref()?)?;
+        if default.kind() == Some(Kind::Bus) {
+            return Some(self.bus_output(config, default).unwrap_or(default));
+        }
+        Some(default)
+    }
+
     pub fn nodes_of(&self, kind: Kind) -> impl Iterator<Item = &NodeInfo> {
         self.nodes.values().filter(move |n| n.kind() == Some(kind))
     }
@@ -197,13 +268,15 @@ impl Graph {
     }
 
     /// Ports that carry a node's audio *out*: monitor ports for sinks, regular
-    /// output ports for everything else.
+    /// output ports for everything else. Virtual sources made from a null
+    /// sink only have monitor ports, so those are used when nothing else is there.
     fn source_ports(&self, node: &NodeInfo) -> Vec<&PortInfo> {
-        let want_monitor = matches!(node.kind(), Some(Kind::Bus | Kind::Output));
-        self.ports
-            .values()
-            .filter(|p| p.node == node.id && p.output && p.monitor == want_monitor)
-            .collect()
+        let outputs = || self.ports.values().filter(|p| p.node == node.id && p.output);
+        if matches!(node.kind(), Some(Kind::Bus | Kind::Output)) {
+            return outputs().filter(|p| p.monitor).collect();
+        }
+        let regular: Vec<_> = outputs().filter(|p| !p.monitor).collect();
+        if regular.is_empty() { outputs().collect() } else { regular }
     }
 
     fn sink_ports(&self, node: &NodeInfo) -> Vec<&PortInfo> {
@@ -232,11 +305,29 @@ impl Graph {
         for node in self.nodes.values() {
             match node.kind() {
                 Some(kind @ (Kind::App | Kind::Mic)) => {
-                    let Some(route) = node.route_key().and_then(|k| config.routes.get(&k)) else {
+                    let key = node.route_key().unwrap_or_default();
+                    let fx_device = self.fx(config, &key).and_then(|f| f.device);
+                    if kind == Kind::App {
+                        if let Some(device) = fx_device {
+                            // The app plays into its effects; those feed its buses.
+                            plan.targets.insert(node.id, device.serial.clone());
+                            let keep = self.policy_target(node.id);
+                            for link in self.links.values() {
+                                if link.out_node == node.id && is_bus(link.in_node) && Some(link.in_node) != keep {
+                                    plan.destroy.push(link.id);
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                    let Some(route) = config.routes.get(&key) else {
                         continue;
                     };
                     let wanted: Vec<u32> =
                         route.iter().filter_map(|b| bus_ids.get(b.as_str()).copied()).collect();
+                    // A mic with effects feeds its buses through its processed copy.
+                    let fx = fx_device.filter(|_| kind == Kind::Mic);
+                    let from = fx.unwrap_or(node);
                     // Apps reach their first bus through WirePlumber (so it also
                     // survives our process exiting); the rest are linked by us.
                     let manual = match kind {
@@ -249,7 +340,7 @@ impl Graph {
                         _ => &wanted[..],
                     };
                     for &bus in manual {
-                        self.want_links(node, &self.nodes[&bus], &mut plan);
+                        self.want_links(from, &self.nodes[&bus], &mut plan);
                     }
                     // Apps leave a bus WirePlumber is handling by retargeting,
                     // which makes WirePlumber drop its own links. When a bus we
@@ -260,10 +351,14 @@ impl Graph {
                         Kind::App => wanted.first().copied().filter(|&p| Some(p) != keep),
                         _ => None,
                     };
+                    let fx_id = fx.map(|f| f.id);
                     for link in self.links.values() {
                         let to = link.in_node;
-                        let stale = !wanted.contains(&to) || Some(to) == handover;
-                        if link.out_node == node.id && is_bus(to) && stale && Some(to) != keep {
+                        let ours = link.out_node == node.id || Some(link.out_node) == fx_id;
+                        if !ours || !is_bus(to) || Some(to) == keep {
+                            continue;
+                        }
+                        if link.out_node != from.id || !wanted.contains(&to) || Some(to) == handover {
                             plan.destroy.push(link.id);
                         }
                     }
@@ -274,7 +369,14 @@ impl Graph {
                         .strip_prefix(MIC_PREFIX)
                         .and_then(|b| self.node_by_name(&format!("{BUS_PREFIX}{b}")));
                     if let Some(bus) = bus {
-                        self.want_links(bus, node, &mut plan);
+                        // With effects on, the bus mic carries the processed
+                        // sound (linked in `plan_fx`).
+                        let key = format!("bus:{}", bus.bus_name().unwrap_or_default());
+                        let from = self.fx(config, &key).and_then(|f| f.output).unwrap_or(bus);
+                        if from.id == bus.id {
+                            self.want_links(bus, node, &mut plan);
+                        }
+                        self.unlink_into(node, &[from.id], &mut plan);
                     }
                 }
                 Some(Kind::Meter) => {
@@ -283,12 +385,10 @@ impl Graph {
                     }
                 }
                 Some(Kind::Bus) => {
-                    let output = node
-                        .bus_name()
-                        .and_then(|b| config.bus(b))
-                        .and_then(|b| b.output.as_deref())
-                        .and_then(|name| self.node_by_name(name))
-                        .filter(|n| n.kind() == Some(Kind::Output));
+                    // With effects running, the processed copy goes to the device instead.
+                    let key = format!("bus:{}", node.bus_name().unwrap_or_default());
+                    let processed = self.fx(config, &key).and_then(|f| f.output).is_some();
+                    let output = self.bus_output(config, node).filter(|_| !processed);
                     if let Some(output) = output {
                         self.want_links(node, output, &mut plan);
                     }
@@ -305,7 +405,87 @@ impl Graph {
                 _ => {}
             }
         }
+        for key in config.active_fx_keys() {
+            self.plan_fx(config, key, &bus_ids, &mut plan);
+        }
         plan
+    }
+
+    /// Feed one strip's effects and send their result where it belongs.
+    fn plan_fx(&self, config: &Config, key: &str, bus_ids: &HashMap<&str, u32>, plan: &mut Plan) {
+        let (Some(target), Some(fx)) = (FxTarget::parse(key), self.fx(config, key)) else { return };
+        let bus = |name: &str| self.node_by_name(&format!("{BUS_PREFIX}{name}"));
+
+        let source = match target {
+            FxTarget::Mic(name) => self.node_by_name(name).filter(|n| n.kind() == Some(Kind::Mic)),
+            FxTarget::App(_) => fx.device,
+            FxTarget::Bus(name) => bus(name),
+        };
+        if let Some(input) = fx.input {
+            if let Some(source) = source {
+                self.want_links(source, input, plan);
+            }
+            self.unlink_into(input, &source.map(|s| s.id).into_iter().collect::<Vec<_>>(), plan);
+        }
+
+        let destinations: Vec<&NodeInfo> = match target {
+            FxTarget::Mic(_) => fx.device.into_iter().collect(),
+            FxTarget::App(_) => {
+                let route: Vec<&NodeInfo> = config
+                    .routes
+                    .get(key)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|b| bus_ids.get(b.as_str()))
+                    .filter_map(|id| self.nodes.get(id))
+                    .collect();
+                if route.is_empty() {
+                    // Like any app without a route: the default output.
+                    self.default_sink
+                        .as_deref()
+                        .and_then(|d| self.node_by_name(d))
+                        .filter(|n| matches!(n.kind(), Some(Kind::Output | Kind::Bus)))
+                        .into_iter()
+                        .collect()
+                } else {
+                    route
+                }
+            }
+            // A bus plays to its device and its microphone.
+            FxTarget::Bus(name) => bus(name)
+                .and_then(|b| self.bus_output(config, b))
+                .into_iter()
+                .chain(self.node_by_name(&format!("{MIC_PREFIX}{name}")))
+                .collect(),
+        };
+        if let Some(output) = fx.output {
+            for to in &destinations {
+                self.want_links(output, to, plan);
+            }
+            for link in self.links.values() {
+                if link.out_node == output.id && !destinations.iter().any(|d| d.id == link.in_node) {
+                    plan.destroy.push(link.id);
+                }
+            }
+        }
+
+        if let Some(reference) = fx.reference {
+            let from = self.echo_reference(config);
+            if let Some(from) = from {
+                self.want_links(from, reference, plan);
+            }
+            // Follow the default output when it changes.
+            self.unlink_into(reference, &from.map(|f| f.id).into_iter().collect::<Vec<_>>(), plan);
+        }
+    }
+
+    /// Remove links into `node` from anything but `keep`.
+    fn unlink_into(&self, node: &NodeInfo, keep: &[u32], plan: &mut Plan) {
+        for link in self.links.values() {
+            if link.in_node == node.id && !keep.contains(&link.out_node) {
+                plan.destroy.push(link.id);
+            }
+        }
     }
 
     fn want_links(&self, from: &NodeInfo, to: &NodeInfo, plan: &mut Plan) {
@@ -396,6 +576,7 @@ mod tests {
                 BusConfig { name: "chat".into(), label: "Chat".into(), output: None, output_label: None, mic: true },
             ],
             routes: Default::default(),
+            fx: Default::default(),
         }
     }
 
@@ -490,6 +671,128 @@ mod tests {
         let into: Vec<_> = plan.create.iter().filter(|p| p.in_node == 8).map(|p| (p.out_port, p.in_port)).collect();
         assert_eq!(into, vec![(52, 80), (53, 81)]);
         assert!(g.nodes[&8].kind() == Some(Kind::BusMic));
+    }
+
+    /// Add the nodes of running effects for `key`: device (if any), input and
+    /// output, with ids from `first`.
+    fn add_fx(g: &mut Graph, key: &str, first: u32, device_class: Option<&str>, out_channels: &[&str]) {
+        let names = FxNames::new(key);
+        if let Some(class) = device_class {
+            g.nodes.insert(first, node(first, &names.device, class));
+            stereo(g, first, first * 10, false, false);
+            stereo(g, first, first * 10 + 2, true, true);
+        }
+        g.nodes.insert(first + 1, node(first + 1, &names.input, "Stream/Input/Audio/Effects"));
+        stereo(g, first + 1, (first + 1) * 10, false, false);
+        g.nodes.insert(first + 2, node(first + 2, &names.output, "Stream/Output/Audio/Effects"));
+        for (i, ch) in out_channels.iter().enumerate() {
+            let id = (first + 2) * 10 + i as u32;
+            g.ports.insert(id, PortInfo { id, node: first + 2, output: true, monitor: false, channel: ch.to_string() });
+        }
+    }
+
+    fn with_fx(mut cfg: Config, key: &str) -> Config {
+        cfg.fx.insert(key.into(), crate::config::Effects { enabled: true, ..Default::default() });
+        cfg
+    }
+
+    fn into(plan: &Plan, n: u32) -> Vec<(u32, u32)> {
+        plan.create.iter().filter(|p| p.in_node == n).map(|p| (p.out_node, p.out_port)).collect()
+    }
+
+    /// Mic effects: virtual mic 8, input 9, output 10.
+    fn fx_graph() -> (Graph, Config) {
+        let mut g = graph();
+        add_fx(&mut g, "mic:alsa_input.mic", 8, Some("Audio/Source/Virtual"), &["MONO"]);
+        let mut cfg = with_fx(config(), "mic:alsa_input.mic");
+        cfg.routes.insert("mic:alsa_input.mic".into(), vec!["chat".into()]);
+        (g, cfg)
+    }
+
+    #[test]
+    fn mic_with_effects_routes_its_processed_copy() {
+        let (mut g, cfg) = fx_graph();
+        // The raw mic was on chat before effects were switched on.
+        g.links.insert(99, LinkInfo { id: 99, out_node: 2, out_port: 20, in_node: 5, in_port: 50 });
+        let plan = g.plan(&cfg);
+        assert!(plan.destroy.contains(&99));
+        assert_eq!(into(&plan, 5), vec![(8, 82), (8, 83)]); // virtual mic to the bus, from its monitor ports
+        assert_eq!(into(&plan, 9), vec![(2, 20), (2, 20)]); // raw mic feeds the effects
+        assert_eq!(into(&plan, 8), vec![(10, 100), (10, 100)]); // processed audio into the virtual mic
+        assert!(g.nodes[&8].kind() == Some(Kind::FxDevice));
+    }
+
+    #[test]
+    fn switching_effects_off_moves_the_route_back_to_the_raw_mic() {
+        let (mut g, mut cfg) = fx_graph();
+        g.links.insert(98, LinkInfo { id: 98, out_node: 8, out_port: 82, in_node: 5, in_port: 50 });
+        cfg.fx.get_mut("mic:alsa_input.mic").unwrap().enabled = false;
+        let plan = g.plan(&cfg);
+        // The virtual mic is no longer the route, but it is not a mic either,
+        // so its old links stay until the node itself goes away.
+        assert!(plan.create.iter().any(|p| p.out_node == 2 && p.in_node == 5));
+    }
+
+    #[test]
+    fn app_with_effects_plays_into_them_and_they_feed_its_buses() {
+        let mut g = graph();
+        add_fx(&mut g, "app:Spotify", 11, Some("Audio/Sink"), &["FL", "FR"]);
+        // Spotify sits on chat via WirePlumber and on main via us.
+        g.stream_targets.insert(1, "1005".into());
+        g.links.insert(97, LinkInfo { id: 97, out_node: 1, out_port: 10, in_node: 5, in_port: 50 });
+        g.links.insert(96, LinkInfo { id: 96, out_node: 1, out_port: 10, in_node: 4, in_port: 40 });
+        let mut cfg = with_fx(config(), "app:Spotify");
+        cfg.routes.insert("app:Spotify".into(), vec!["chat".into(), "main".into()]);
+        let plan = g.plan(&cfg);
+        assert_eq!(plan.targets.get(&1), Some(&"1011".to_string()));
+        assert_eq!(plan.destroy, vec![96]); // ours goes; WirePlumber moves its own
+        assert_eq!(into(&plan, 12), vec![(11, 112), (11, 113)]); // virtual output's monitor into effects
+        assert_eq!(into(&plan, 5), vec![(13, 130), (13, 131)]);
+        assert_eq!(into(&plan, 4), vec![(13, 130), (13, 131)]);
+        assert!(g.nodes[&11].kind() == Some(Kind::FxDevice)); // not listed as an output
+    }
+
+    #[test]
+    fn app_with_effects_and_no_route_goes_to_the_default_output() {
+        let mut g = graph();
+        add_fx(&mut g, "app:Spotify", 11, Some("Audio/Sink"), &["FL", "FR"]);
+        g.default_sink = Some("headphones".into());
+        let plan = g.plan(&with_fx(config(), "app:Spotify"));
+        let from_fx: Vec<_> = into(&plan, 3).into_iter().filter(|&(n, _)| n == 13).collect();
+        assert_eq!(from_fx, vec![(13, 130), (13, 131)]);
+    }
+
+    #[test]
+    fn bus_with_effects_reaches_its_device_through_them() {
+        let mut g = graph();
+        add_fx(&mut g, "bus:main", 14, None, &["FL", "FR"]);
+        g.nodes.insert(18, node(18, "hepcat.mic.main", "Audio/Source/Virtual"));
+        stereo(&mut g, 18, 180, false, false);
+        // Before effects: bus straight to the headphones and its mic.
+        g.links.insert(95, LinkInfo { id: 95, out_node: 4, out_port: 42, in_node: 3, in_port: 30 });
+        g.links.insert(94, LinkInfo { id: 94, out_node: 4, out_port: 42, in_node: 18, in_port: 180 });
+        // The effects already feed the bus mic on the left channel.
+        g.links.insert(93, LinkInfo { id: 93, out_node: 16, out_port: 160, in_node: 18, in_port: 180 });
+        let plan = g.plan(&with_fx(config(), "bus:main"));
+        assert!(plan.destroy.contains(&95) && plan.destroy.contains(&94));
+        assert!(!plan.destroy.contains(&93), "the bus mic link must not be torn down");
+        assert_eq!(into(&plan, 15), vec![(4, 42), (4, 43)]); // bus monitor into effects
+        assert_eq!(into(&plan, 3), vec![(16, 160), (16, 161)]); // processed to the headphones
+        assert_eq!(into(&plan, 18), vec![(16, 161)]); // and to the bus mic
+    }
+
+    #[test]
+    fn echo_reference_is_the_output_behind_the_default_bus() {
+        let mut g = graph();
+        let key = "mic:alsa_input.mic";
+        g.nodes.insert(10, node(10, &FxNames::new(key).reference, "Stream/Input/Audio/Effects"));
+        stereo(&mut g, 10, 100, false, false);
+        g.default_sink = Some("hepcat.bus.main".into());
+        g.links.insert(97, LinkInfo { id: 97, out_node: 5, out_port: 52, in_node: 10, in_port: 100 });
+        let plan = g.plan(&with_fx(config(), key));
+        let into: Vec<_> = plan.create.iter().filter(|p| p.in_node == 10).map(|p| p.out_port).collect();
+        assert_eq!(into, vec![32, 33]); // headphones monitor
+        assert!(plan.destroy.contains(&97));
     }
 
     #[test]

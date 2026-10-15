@@ -49,6 +49,129 @@ pub struct Config {
     /// The first bus of an app route is its primary target.
     #[serde(default)]
     pub routes: BTreeMap<String, Vec<String>>,
+    /// Strip key (`mic:<node.name>`, `app:<name>` or `bus:<name>`) -> its effects.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fx: BTreeMap<String, Effects>,
+}
+
+/// What a key in [`Config::fx`] applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FxTarget<'a> {
+    /// A microphone, by node.name.
+    Mic(&'a str),
+    /// An application, by the name in its route key.
+    App(&'a str),
+    /// One of our buses, by bus name.
+    Bus(&'a str),
+}
+
+impl<'a> FxTarget<'a> {
+    pub fn parse(key: &'a str) -> Option<Self> {
+        let (kind, name) = key.split_once(':')?;
+        match kind {
+            "mic" => Some(Self::Mic(name)),
+            "app" => Some(Self::App(name)),
+            "bus" => Some(Self::Bus(name)),
+            _ => None,
+        }
+    }
+
+    /// Microphones are processed in mono, everything else in stereo.
+    pub fn channels(self) -> usize {
+        if matches!(self, Self::Mic(_)) { 1 } else { 2 }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NoiseMode {
+    #[default]
+    Off,
+    /// WebRTC noise suppression: removes steady background noise (fans, hum,
+    /// hiss) but lets every other sound through, claps and music included.
+    Standard,
+    /// RNNoise: a neural network that keeps speech and drops everything else.
+    Voice,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum VoiceEffect {
+    #[default]
+    None,
+    Robot,
+    Alien,
+    Radio,
+    Telephone,
+    Megaphone,
+    Underwater,
+    Echo,
+    Hall,
+}
+
+/// Processing applied to a microphone. While `enabled`, Hepcat offers a
+/// processed copy of the mic and routes that instead of the raw device.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Effects {
+    pub enabled: bool,
+    /// Manual gain before anything else, in dB.
+    pub gain_db: f32,
+    /// Automatic gain control: keeps speech at a steady level.
+    pub auto_gain: bool,
+    pub noise: NoiseMode,
+    /// Remove what the speakers play from the microphone signal.
+    pub echo: bool,
+    pub gate: bool,
+    /// The gate opens above this level, in dBFS.
+    pub gate_db: f32,
+    pub bass_db: f32,
+    pub presence_db: f32,
+    pub treble_db: f32,
+    /// Compressor amount, 0 (off) to 1.
+    pub compressor: f32,
+    /// Pitch shift in semitones.
+    pub pitch: f32,
+    pub voice: VoiceEffect,
+    /// Wet/dry mix of `voice`, 0 to 1.
+    pub voice_mix: f32,
+}
+
+impl Default for Effects {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            gain_db: 0.0,
+            auto_gain: false,
+            noise: NoiseMode::Off,
+            echo: false,
+            gate: false,
+            gate_db: -50.0,
+            bass_db: 0.0,
+            presence_db: 0.0,
+            treble_db: 0.0,
+            compressor: 0.0,
+            pitch: 0.0,
+            voice: VoiceEffect::None,
+            voice_mix: 1.0,
+        }
+    }
+}
+
+impl Effects {
+    /// Clamp values from the UI or a hand-edited config to sane ranges.
+    pub fn sanitized(mut self) -> Self {
+        let clamp = |v: f32, lo: f32, hi: f32| if v.is_finite() { v.clamp(lo, hi) } else { 0.0f32.clamp(lo, hi) };
+        self.gain_db = clamp(self.gain_db, -30.0, 30.0);
+        self.gate_db = clamp(self.gate_db, -90.0, 0.0);
+        self.bass_db = clamp(self.bass_db, -15.0, 15.0);
+        self.presence_db = clamp(self.presence_db, -15.0, 15.0);
+        self.treble_db = clamp(self.treble_db, -15.0, 15.0);
+        self.compressor = clamp(self.compressor, 0.0, 1.0);
+        self.pitch = clamp(self.pitch, -12.0, 12.0);
+        self.voice_mix = clamp(self.voice_mix, 0.0, 1.0);
+        self
+    }
 }
 
 impl Config {
@@ -61,8 +184,15 @@ impl Config {
         let path = Self::path()?;
         Self::migrate_from_mixwire(&path);
         let text = std::fs::read_to_string(&path).ok()?;
-        match toml::from_str(&text) {
-            Ok(cfg) => Some(cfg),
+        match toml::from_str::<Self>(&text) {
+            Ok(mut cfg) => {
+                // The first effects builds keyed microphones by bare node.name.
+                cfg.fx = std::mem::take(&mut cfg.fx)
+                    .into_iter()
+                    .map(|(k, v)| if FxTarget::parse(&k).is_some() { (k, v) } else { (format!("mic:{k}"), v) })
+                    .collect();
+                Some(cfg)
+            }
             Err(e) => {
                 eprintln!("hepcat: ignoring unreadable config {}: {e}", path.display());
                 None
@@ -109,7 +239,18 @@ impl Config {
                 BusConfig { name: "chat".into(), label: "Chat".into(), output, output_label: None, mic: false },
             ],
             routes: BTreeMap::new(),
+            fx: BTreeMap::new(),
         }
+    }
+
+    /// Effects of the strip with this key, if they are switched on.
+    pub fn active_fx(&self, key: &str) -> Option<&Effects> {
+        self.fx.get(key).filter(|fx| fx.enabled)
+    }
+
+    /// Keys of every strip whose effects are switched on.
+    pub fn active_fx_keys(&self) -> impl Iterator<Item = &str> {
+        self.fx.iter().filter(|(_, fx)| fx.enabled).map(|(k, _)| k.as_str())
     }
 
     pub fn bus(&self, name: &str) -> Option<&BusConfig> {

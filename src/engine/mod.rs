@@ -2,11 +2,14 @@
 //! keeps a [`Graph`] mirror up to date, re-applies the user's routing whenever
 //! the graph changes, and publishes a JSON snapshot for the UI.
 
+mod format;
+mod fx;
 pub mod graph;
 mod meter;
 mod volume;
 
-use crate::config::{BusConfig, Config};
+use crate::config::{BUS_PREFIX, BusConfig, Config, Effects, FxTarget};
+use fx::{FxNames, FxNode};
 use graph::{Graph, Kind, LinkInfo, NodeInfo, PortInfo, PortPair};
 use pipewire as pw;
 use pw::metadata::{Metadata, MetadataListener};
@@ -22,7 +25,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 use meter::Meter;
-use volume::{Change, VolumeWorker};
+use volume::{Change, Route};
 
 /// Requests from the UI.
 #[derive(Debug)]
@@ -35,6 +38,9 @@ pub enum Command {
     AddBus { label: String },
     RemoveBus { name: String },
     SetDefaultSink { name: String },
+    SetDefaultSource { name: String },
+    /// Replace the effects of the strip with this key (`mic:…`, `app:…`, `bus:…`).
+    SetFx { key: String, fx: Effects },
     /// Meters cost a little CPU, so they are paused while nobody is looking.
     SetMeters(bool),
 }
@@ -84,7 +90,10 @@ struct State {
     destroyed: HashMap<u32, Instant>,
     /// target.object values we last wrote, so we only write changes.
     targets: HashMap<u32, String>,
-    volume: VolumeWorker,
+    /// Bound audio devices, for setting volume on their routes.
+    devices: HashMap<u32, (pw::device::Device, pw::device::DeviceListener)>,
+    /// Active route of each (device id, card.profile.device).
+    routes: HashMap<(u32, i32), Route>,
     /// Level meters by metered node id.
     meters: HashMap<u32, Meter>,
     meters_enabled: bool,
@@ -95,6 +104,11 @@ struct State {
     legacy_clients: HashSet<u32>,
     /// The user's chosen default output (may point at a node that is gone).
     configured_sink: Option<String>,
+    configured_source: Option<String>,
+    /// Effects nodes by strip key.
+    fx: HashMap<String, FxNode>,
+    /// A processed mic to make the default input as soon as it exists.
+    pending_default_source: Option<String>,
     last_snapshot: String,
     last_levels: String,
 }
@@ -103,7 +117,12 @@ fn run(rx: pw::channel::Receiver<Command>, on_event: Box<dyn Fn(Event)>) -> anyh
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&mainloop, None)?;
-    let core = context.connect_rc(Some(properties! { "application.name" => "Hepcat" }))?;
+    let core = context.connect_rc(Some(properties! {
+        "application.name" => "Hepcat",
+        // Marks us as an audio manager (like pavucontrol): inside a Flatpak,
+        // WirePlumber then lets us move streams and change defaults.
+        "media.category" => "Manager",
+    }))?;
     let registry = core.get_registry_rc()?;
 
     let state = Rc::new(RefCell::new(State {
@@ -120,13 +139,17 @@ fn run(rx: pw::channel::Receiver<Command>, on_event: Box<dyn Fn(Event)>) -> anyh
         held_links: HashMap::new(),
         destroyed: HashMap::new(),
         targets: HashMap::new(),
-        volume: VolumeWorker::spawn(),
+        devices: HashMap::new(),
+        routes: HashMap::new(),
         meters: HashMap::new(),
         meters_enabled: std::env::var_os("HEPCAT_NO_METERS").is_none(),
         on_event,
         legacy_nodes: HashMap::new(),
         legacy_clients: HashSet::new(),
         configured_sink: None,
+        configured_source: None,
+        fx: HashMap::new(),
+        pending_default_source: None,
         last_snapshot: String::new(),
         last_levels: String::new(),
     }));
@@ -238,8 +261,8 @@ fn on_global(state: &Rc<RefCell<State>>, global: &pw::registry::GlobalObject<&sp
             };
             match info.kind() {
                 None => return,
-                // Our own meters only need to be known for linking.
-                Some(Kind::Meter) => {
+                // Our own capture streams only need to be known for linking.
+                Some(Kind::Meter | Kind::FxIn | Kind::FxRef | Kind::FxOut) => {
                     st.graph.nodes.insert(global.id, info);
                     st.dirty = true;
                     return;
@@ -287,13 +310,39 @@ fn on_global(state: &Rc<RefCell<State>>, global: &pw::registry::GlobalObject<&sp
             };
             let pair = PortPair { out_node, out_port, in_node, in_port };
             if let Some((proxy, _)) = st.pending_links.remove(&pair) {
-                if st.graph.nodes.get(&in_node).and_then(NodeInfo::kind) == Some(Kind::Meter) {
+                if holds_links(st.graph.nodes.get(&in_node)) {
                     st.held_links.insert(global.id, proxy);
                 }
             }
             st.graph
                 .links
                 .insert(global.id, LinkInfo { id: global.id, out_node, out_port, in_node, in_port });
+        }
+        ObjectType::Device => {
+            if props.get("media.class") != Some("Audio/Device") {
+                return;
+            }
+            let device: pw::device::Device = match st.registry.bind(global) {
+                Ok(device) => device,
+                Err(e) => {
+                    eprintln!("hepcat: failed to bind device {}: {e}", global.id);
+                    return;
+                }
+            };
+            let id = global.id;
+            let weak = Rc::downgrade(state);
+            let listener = device
+                .add_listener_local()
+                .param(move |_seq, _type, _index, _next, pod| {
+                    let Some(state) = weak.upgrade() else { return };
+                    if let Some((profile_device, route)) = pod.and_then(volume::parse_route) {
+                        state.borrow_mut().routes.insert((id, profile_device), route);
+                    }
+                })
+                .register();
+            device.subscribe_params(&[spa::param::ParamType::Route]);
+            st.devices.insert(id, (device, listener));
+            return;
         }
         ObjectType::Client => {
             if props.get("application.name") == Some("Mixwire") {
@@ -319,6 +368,12 @@ fn on_global(state: &Rc<RefCell<State>>, global: &pw::registry::GlobalObject<&sp
                         Some("default.configured.audio.sink") if subject == 0 => {
                             st.configured_sink = value.and_then(json_name);
                         }
+                        Some("default.audio.source") if subject == 0 => {
+                            st.graph.default_source = value.and_then(json_name);
+                        }
+                        Some("default.configured.audio.source") if subject == 0 => {
+                            st.configured_source = value.and_then(json_name);
+                        }
                         Some("target.object") => match value {
                             Some(v) => {
                                 st.graph.stream_targets.insert(subject, v.to_owned());
@@ -330,6 +385,7 @@ fn on_global(state: &Rc<RefCell<State>>, global: &pw::registry::GlobalObject<&sp
                         // A `None` key means the whole metadata was cleared.
                         None => {
                             st.graph.default_sink = None;
+                            st.graph.default_source = None;
                             st.graph.stream_targets.clear();
                         }
                         _ => return 0,
@@ -369,6 +425,10 @@ fn node_listener(node: &Node, id: u32, weak: Weak<RefCell<State>>) -> NodeListen
             keep(get("application.process.binary"), &mut node.binary);
             keep(get("application.icon-name").or_else(|| get("device.icon-name")), &mut node.icon);
             keep(get("media.name"), &mut node.media_name);
+            let num = |k: &str| props.get(k).and_then(|v| v.parse().ok());
+            if let (Some(device), Some(profile_device)) = (num("device.id"), num("card.profile.device")) {
+                node.device = Some((device as u32, profile_device));
+            }
             if let Some(d) = get("node.description") {
                 node.description = d;
             }
@@ -379,8 +439,9 @@ fn node_listener(node: &Node, id: u32, weak: Weak<RefCell<State>>) -> NodeListen
             let Some((volume, mute)) = pod.and_then(parse_props) else { return };
             let mut st = state.borrow_mut();
             let Some(node) = st.graph.nodes.get_mut(&id) else { return };
-            if let Some(v) = volume {
+            if let Some((v, channels)) = volume {
                 node.volume = v;
+                node.channels = channels;
             }
             if let Some(m) = mute {
                 node.mute = m;
@@ -390,9 +451,9 @@ fn node_listener(node: &Node, id: u32, weak: Weak<RefCell<State>>) -> NodeListen
         .register()
 }
 
-/// Pull channel volume (converted to the cubic UI scale) and mute out of a
-/// node's Props param.
-fn parse_props(pod: &Pod) -> Option<(Option<f32>, Option<bool>)> {
+/// Pull channel volume (converted to the cubic UI scale, with the channel
+/// count) and mute out of a node's Props param.
+fn parse_props(pod: &Pod) -> Option<(Option<(f32, usize)>, Option<bool>)> {
     let (_, value) = PodDeserializer::deserialize_any_from(pod.as_bytes()).ok()?;
     let Value::Object(obj) = value else { return None };
     let mut volume = None;
@@ -400,13 +461,19 @@ fn parse_props(pod: &Pod) -> Option<(Option<f32>, Option<bool>)> {
     for prop in obj.properties {
         match (prop.key, prop.value) {
             (spa::sys::SPA_PROP_channelVolumes, Value::ValueArray(ValueArray::Float(v))) => {
-                volume = v.iter().copied().reduce(f32::max).map(f32::cbrt);
+                volume = v.iter().copied().reduce(f32::max).map(|max| (max.cbrt(), v.len()));
             }
             (spa::sys::SPA_PROP_mute, Value::Bool(m)) => mute = Some(m),
             _ => {}
         }
     }
     (volume.is_some() || mute.is_some()).then_some((volume, mute))
+}
+
+/// Links into our own capture streams die with Hepcat (they are not left
+/// lingering), so we keep their proxies.
+fn holds_links(target: Option<&NodeInfo>) -> bool {
+    matches!(target.and_then(NodeInfo::kind), Some(Kind::Meter | Kind::FxIn | Kind::FxRef | Kind::FxDevice))
 }
 
 /// Metadata values for default devices look like `{"name":"alsa_output..."}`.
@@ -420,6 +487,9 @@ impl State {
         self.graph.ports.remove(&id);
         self.graph.links.remove(&id);
         self.nodes.remove(&id);
+        if self.devices.remove(&id).is_some() {
+            self.routes.retain(|(device, _), _| *device != id);
+        }
         self.legacy_nodes.remove(&id);
         if self.legacy_clients.remove(&id) {
             self.dirty = true;
@@ -448,6 +518,7 @@ impl State {
         }
         self.remove_legacy_nodes();
         self.ensure_buses();
+        self.sync_fx();
         self.sync_meters();
         self.apply_plan();
         self.remember_output_labels();
@@ -497,6 +568,115 @@ impl State {
                 let _ = self.registry.destroy_global(id);
             }
         }
+    }
+
+    /// Start, update and stop the effects nodes to match the config.
+    fn sync_fx(&mut self) {
+        let wanted: Vec<(String, Effects)> = self
+            .config
+            .iter()
+            .flat_map(|c| c.fx.iter())
+            .filter(|(_, fx)| fx.enabled)
+            .map(|(key, fx)| (key.clone(), *fx))
+            .collect();
+        self.fx.retain(|key, _| wanted.iter().any(|(k, _)| k == key));
+        for (key, fx) in wanted {
+            if let Some(node) = self.fx.get_mut(&key) {
+                node.update(&self.core, &fx);
+                continue;
+            }
+            // Started once what they process shows up, and kept while it is
+            // gone: apps stay attached to the virtual device, and browsers
+            // that recreate their streams do not restart the effects.
+            let Some(label) = self.fx_label(&key) else { continue };
+            match FxNode::new(&self.core, &key, &label, &fx) {
+                Ok(node) => {
+                    self.fx.insert(key, node);
+                }
+                Err(e) => eprintln!("hepcat: failed to start effects for {key}: {e}"),
+            }
+        }
+
+        if let Some(name) = &self.pending_default_source {
+            if self.graph.node_by_name(name).is_some() {
+                let name = name.clone();
+                self.set_default_source(&name);
+                self.pending_default_source = None;
+            }
+        }
+    }
+
+    /// Name of the strip with this effects key, if it is there right now.
+    fn fx_label(&self, key: &str) -> Option<String> {
+        let g = &self.graph;
+        match FxTarget::parse(key)? {
+            FxTarget::Mic(name) => g.node_by_name(name).filter(|n| n.kind() == Some(Kind::Mic)).map(NodeInfo::label),
+            FxTarget::App(_) => g.nodes_of(Kind::App).find(|n| n.route_key().as_deref() == Some(key)).map(NodeInfo::label),
+            FxTarget::Bus(name) => {
+                g.node_by_name(&format!("{BUS_PREFIX}{name}"))?;
+                self.config.as_ref()?.bus(name).map(|b| b.label.clone())
+            }
+        }
+    }
+
+    /// Stream nodes of the app with this route key.
+    fn app_nodes(&self, key: &str) -> Vec<u32> {
+        self.graph.nodes.values().filter(|n| n.route_key().as_deref() == Some(key)).map(|n| n.id).collect()
+    }
+
+    /// Let WirePlumber send these app streams to the default output again.
+    fn clear_targets(&mut self, nodes: &[u32]) {
+        for &id in nodes {
+            self.targets.remove(&id);
+            if let Some((metadata, _)) = &self.metadata {
+                metadata.set_property(id, "target.object", None, None);
+            }
+        }
+    }
+
+    fn set_default_source(&mut self, name: &str) {
+        if let Some((metadata, _)) = &self.metadata {
+            let value = json!({ "name": name }).to_string();
+            metadata.set_property(0, "default.configured.audio.source", Some("Spa:String:JSON"), Some(&value));
+        }
+    }
+
+    /// Store a strip's effects. Whoever used a raw mic as the default input
+    /// gets the processed one while effects are on, and the raw one back after.
+    fn set_fx(&mut self, key: String, fx: Effects) {
+        let Some(target) = FxTarget::parse(&key) else {
+            eprintln!("hepcat: effects for unknown strip {key:?}");
+            return;
+        };
+        let mut fx = fx.sanitized();
+        // Echo cancellation removes the speakers from a microphone; nothing else has an echo.
+        fx.echo &= matches!(target, FxTarget::Mic(_));
+        let was_enabled = self.config().active_fx(&key).is_some();
+        match target {
+            FxTarget::Mic(mic) => {
+                let device = FxNames::new(&key).device;
+                let default = self.configured_source.clone().or(self.graph.default_source.clone());
+                if fx.enabled && !was_enabled && default.as_deref() == Some(mic) {
+                    self.pending_default_source = Some(device);
+                } else if !fx.enabled && was_enabled {
+                    if self.pending_default_source.as_deref() == Some(device.as_str()) {
+                        self.pending_default_source = None;
+                    }
+                    if default.as_deref() == Some(device.as_str()) {
+                        self.set_default_source(mic);
+                    }
+                }
+            }
+            // An app with a route is moved back to its first bus by the
+            // reconciler; one without has to be handed back to WirePlumber.
+            FxTarget::App(_) if was_enabled && !fx.enabled && !self.config().routes.contains_key(&key) => {
+                let nodes = self.app_nodes(&key);
+                self.clear_targets(&nodes);
+            }
+            _ => {}
+        }
+        self.config().fx.insert(key, fx);
+        self.save();
     }
 
     fn remove_legacy_nodes(&mut self) {
@@ -551,11 +731,19 @@ impl State {
     }
 
     fn emit_levels(&mut self) {
-        let levels: serde_json::Map<String, serde_json::Value> = self
-            .meters
-            .iter_mut()
-            .map(|(id, m)| (id.to_string(), json!((f64::from(m.take_level()) * 100.0).round() / 100.0)))
-            .collect();
+        let round = |level: f32| json!((f64::from(level) * 100.0).round() / 100.0);
+        let mut levels: serde_json::Map<String, serde_json::Value> =
+            self.meters.iter_mut().map(|(id, m)| (id.to_string(), round(m.take_level()))).collect();
+        // Processed mics are measured inside the processor, so their meter
+        // moves even while no app is recording them.
+        if self.meters_enabled {
+            for (key, node) in &mut self.fx {
+                let level = node.take_level();
+                if let Some(output) = self.graph.node_by_name(&FxNames::new(key).output) {
+                    levels.insert(output.id.to_string(), round(level));
+                }
+            }
+        }
         let levels = serde_json::Value::Object(levels).to_string();
         if levels != self.last_levels {
             if std::env::var_os("HEPCAT_DEBUG").is_some() {
@@ -591,8 +779,11 @@ impl State {
             if self.pending_links.contains_key(&pair) {
                 continue;
             }
-            let meter_of = self.graph.nodes.get(&pair.in_node).filter(|n| n.kind() == Some(Kind::Meter));
-            let to_meter = meter_of.is_some();
+            let target = self.graph.nodes.get(&pair.in_node);
+            let meter_of = target.filter(|n| n.kind() == Some(Kind::Meter));
+            let held = holds_links(target);
+            // Meters and the echo reference watch without keeping anything awake.
+            let passive = matches!(target.and_then(NodeInfo::kind), Some(Kind::Meter | Kind::FxRef));
             // A meter we just dropped can still be in the graph for a moment.
             if let Some(meter) = meter_of {
                 let ours = meter.metered_node().and_then(|id| self.meters.get(&id)).map(Meter::node_id);
@@ -606,10 +797,10 @@ impl State {
                 "link.input.node" => pair.in_node.to_string(),
                 "link.input.port" => pair.in_port.to_string(),
             };
-            if to_meter {
-                // Meters watch without keeping anything awake, and go away with us.
+            if passive {
                 props.insert("link.passive", "true");
-            } else {
+            }
+            if !held {
                 // Keep routing alive when the window is closed.
                 props.insert("object.linger", "true");
             }
@@ -643,16 +834,38 @@ impl State {
         }
     }
 
+    /// Set a node's volume or mute: on its device's active route for
+    /// hardware, on the node itself otherwise.
+    fn apply_volume(&self, id: u32, change: Change) {
+        let Some(info) = self.graph.nodes.get(&id) else { return };
+        let route = info.device.and_then(|(dev, pd)| Some((self.devices.get(&dev)?, pd, *self.routes.get(&(dev, pd))?)));
+        if let Some(((device, _), profile_device, route)) = route {
+            let route = Route { channels: if route.channels > 0 { route.channels } else { info.channels }, ..route };
+            if let Some(bytes) = volume::route_param(route, profile_device, change) {
+                if let Some(pod) = Pod::from_bytes(&bytes) {
+                    device.set_param(spa::param::ParamType::Route, 0, pod);
+                }
+            }
+            return;
+        }
+        let Some((node, _)) = self.nodes.get(&id) else { return };
+        if let Some(bytes) = volume::node_param(change, info.channels) {
+            if let Some(pod) = Pod::from_bytes(&bytes) {
+                node.set_param(spa::param::ParamType::Props, 0, pod);
+            }
+        }
+    }
+
     fn handle(&mut self, cmd: Command) {
         match cmd {
             Command::SetVolume { ids, volume } => {
                 for id in ids {
-                    self.volume.send(id, Change::Volume(volume));
+                    self.apply_volume(id, Change::Volume(volume));
                 }
             }
             Command::SetMute { ids, mute } => {
                 for id in ids {
-                    self.volume.send(id, Change::Mute(mute));
+                    self.apply_volume(id, Change::Mute(mute));
                 }
             }
             Command::ToggleRoute { key, bus } => self.toggle_route(&key, &bus),
@@ -695,12 +908,22 @@ impl State {
                     metadata.set_property(0, "default.configured.audio.sink", Some("Spa:String:JSON"), Some(&value));
                 }
             }
+            Command::SetDefaultSource { name } => {
+                self.pending_default_source = None;
+                self.set_default_source(&name);
+            }
+            Command::SetFx { key, fx } => self.set_fx(key, fx),
         }
     }
 
-    /// Buses a source is currently feeding, in bus order.
-    fn current_buses(&self, nodes: &[u32]) -> Vec<String> {
-        let linked: BTreeSet<u32> = nodes.iter().flat_map(|&n| self.graph.linked_targets(n)).collect();
+    /// Buses the source with route key `key` is currently feeding, directly
+    /// or through its effects, in bus order.
+    fn current_buses(&self, key: &str, nodes: &[u32]) -> Vec<String> {
+        let g = &self.graph;
+        let fx = self.config.as_ref().and_then(|c| g.fx(c, key));
+        let fx = fx.into_iter().flat_map(|f| [f.device, f.output]).flatten().map(|n| n.id);
+        let linked: BTreeSet<u32> =
+            nodes.iter().copied().chain(fx).flat_map(|n| self.graph.linked_targets(n)).collect();
         self.config
             .iter()
             .flat_map(|c| c.buses.iter())
@@ -710,16 +933,10 @@ impl State {
     }
 
     fn toggle_route(&mut self, key: &str, bus: &str) {
-        let nodes: Vec<u32> = self
-            .graph
-            .nodes
-            .values()
-            .filter(|n| n.route_key().as_deref() == Some(key))
-            .map(|n| n.id)
-            .collect();
+        let nodes = self.app_nodes(key);
         let mut route = match self.config().routes.get(key) {
             Some(r) => r.clone(),
-            None => self.current_buses(&nodes),
+            None => self.current_buses(key, &nodes),
         };
         if let Some(pos) = route.iter().position(|b| b == bus) {
             route.remove(pos);
@@ -730,13 +947,11 @@ impl State {
         if route.is_empty() && key.starts_with("app:") {
             // No buses left: clearing the target makes WirePlumber move the app
             // back to the default device by itself. Its links must not be
-            // destroyed here, or WirePlumber loses track of the stream.
+            // destroyed here, or WirePlumber loses track of the stream. With
+            // effects on, the app stays on them and they go to the default.
             self.config().routes.remove(key);
-            for &id in &nodes {
-                self.targets.remove(&id);
-                if let Some((metadata, _)) = &self.metadata {
-                    metadata.set_property(id, "target.object", None, None);
-                }
+            if self.config().active_fx(key).is_none() {
+                self.clear_targets(&nodes);
             }
         } else {
             self.config().routes.insert(key.to_string(), route);
@@ -777,6 +992,14 @@ impl State {
         let empty = Config::default();
         let cfg = self.config.as_ref().unwrap_or(&empty);
         let is_default = |name: &str| g.default_sink.as_deref() == Some(name);
+        // Effects settings of a strip, the node playing its processed audio
+        // (if running) and the ids to meter: with effects on, what is heard.
+        let fx_info = |key: &str, ids: &[u32]| {
+            let fx = cfg.fx.get(key).copied().unwrap_or_default();
+            let output = g.fx(cfg, key).and_then(|f| f.output);
+            let meter: Vec<u32> = output.map_or_else(|| ids.to_vec(), |o| vec![o.id]);
+            (serde_json::to_string(&fx).unwrap_or_default(), output, meter)
+        };
 
         // Apps are grouped by route key, so a browser with five tabs playing
         // shows up as one strip.
@@ -792,8 +1015,10 @@ impl State {
             .iter()
             .map(|(key, nodes)| {
                 let ids: Vec<u32> = nodes.iter().map(|n| n.id).collect();
+                let (fx, fx_output, meter) = fx_info(key, &ids);
                 let direct: Vec<String> = ids
                     .iter()
+                    .chain(fx_output.map(|o| &o.id))
                     .flat_map(|&id| g.linked_targets(id))
                     .collect::<BTreeSet<_>>()
                     .into_iter()
@@ -810,9 +1035,12 @@ impl State {
                     "ids": ids,
                     "volume": first.volume,
                     "mute": first.mute,
-                    "buses": self.current_buses(&ids),
+                    "buses": self.current_buses(key, &ids),
                     "pinned": cfg.routes.contains_key(key),
                     "direct": direct.join(", "),
+                    "meterIds": meter,
+                    "fx": fx,
+                    "fxActive": fx_output.is_some(),
                 })
             })
             .collect();
@@ -821,16 +1049,25 @@ impl State {
             .nodes_of(Kind::Mic)
             .map(|n| {
                 let key = n.route_key().unwrap_or_default();
+                let (fx, fx_output, meter) = fx_info(&key, &[n.id]);
+                let device = g.fx(cfg, &key).and_then(|f| f.device);
+                let default = g.default_source.as_deref();
                 json!({
                     "key": key,
+                    "name": n.name,
                     "label": n.label(),
                     "icon": n.icon.clone().unwrap_or_else(|| "audio-input-microphone".into()),
                     "ids": [n.id],
+                    "meterIds": meter,
                     "volume": n.volume,
                     "mute": n.mute,
-                    "buses": self.current_buses(&[n.id]),
+                    "buses": self.current_buses(&key, &[n.id]),
                     "pinned": cfg.routes.contains_key(&key),
-                    "isDefault": false,
+                    "isDefault": default.is_some() && (default == Some(n.name.as_str()) || default == device.map(|d| d.name.as_str())),
+                    "fx": fx,
+                    "fxActive": fx_output.is_some(),
+                    // The processed mic, for making it the default input.
+                    "fxDevice": device.map(|d| d.name.clone()).unwrap_or_default(),
                 })
             })
             .collect();
@@ -841,6 +1078,8 @@ impl State {
             .map(|b| {
                 let node = g.node_by_name(&b.node_name());
                 let output = b.output.as_deref().and_then(|o| g.node_by_name(o));
+                let ids: Vec<u32> = node.map(|n| vec![n.id]).unwrap_or_default();
+                let (fx, fx_output, meter) = fx_info(&format!("bus:{}", b.name), &ids);
                 json!({
                     "name": b.name,
                     "label": b.label,
@@ -858,6 +1097,9 @@ impl State {
                     "isDefault": is_default(&b.node_name()),
                     "nodeName": b.node_name(),
                     "mic": b.mic,
+                    "meterIds": meter,
+                    "fx": fx,
+                    "fxActive": fx_output.is_some(),
                 })
             })
             .collect();

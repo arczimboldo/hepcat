@@ -1,0 +1,51 @@
+# Flatpak manifest. Build and install locally from the repository root:
+#   flatpak run org.flatpak.Builder --user --install --force-clean \
+#     build-dir packaging/flatpak/io.github.arczimboldo.Hepcat.yml
+# After changing Cargo.lock, regenerate cargo-sources.json with
+# flatpak-cargo-generator.py from flatpak/flatpak-builder-tools.
+id: io.github.arczimboldo.Hepcat
+runtime: org.kde.Platform
+runtime-version: '6.11'
+sdk: org.kde.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.llvm21
+command: hepcat
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # Hepcat manages the whole PipeWire graph: buses, links, volumes, effects.
+  - --filesystem=xdg-run/pipewire-0
+  # System tray icon.
+  - --talk-name=org.kde.StatusNotifierWatcher
+  # Follow the Plasma colour scheme and fonts.
+  - --filesystem=xdg-config/kdeglobals:ro
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm21/bin
+  prepend-ld-library-path: /usr/lib/sdk/llvm21/lib
+  env:
+    CARGO_HOME: /run/build/hepcat/cargo
+    # bindgen (for the PipeWire bindings) needs libclang.
+    LIBCLANG_PATH: /usr/lib/sdk/llvm21/lib
+modules:
+  - name: hepcat
+    buildsystem: simple
+    build-commands:
+      - cargo --offline build --release --locked
+      - install -Dm755 target/release/hepcat -t /app/bin
+      - install -Dm644 io.github.arczimboldo.Hepcat.desktop -t /app/share/applications
+      - install -Dm644 io.github.arczimboldo.Hepcat.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 icons/hepcat.svg /app/share/icons/hicolor/scalable/apps/io.github.arczimboldo.Hepcat.svg
+      - install -Dm644 icons/hepcat-symbolic.svg /app/share/icons/hicolor/symbolic/apps/io.github.arczimboldo.Hepcat-symbolic.svg
+      - install -Dm644 LICENSE -t /app/share/licenses/io.github.arczimboldo.Hepcat
+    sources:
+      # For Flathub, replace this with the release: type: git, url, tag, commit.
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - .flatpak-builder
+          - build-dir
+      - cargo-sources.json

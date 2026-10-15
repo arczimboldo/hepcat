@@ -9,6 +9,8 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QDBusConnection>
+#include <QDBusMessage>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -30,13 +32,27 @@
 
 namespace {
 
-const QString instanceName = QStringLiteral("org.hepcat.Hepcat");
+const QString appId = QStringLiteral("io.github.arczimboldo.Hepcat");
+const QString instanceName = appId;
+
+// Where the running instance listens. Inside a Flatpak, /tmp may be private
+// to each launch, so it lives in the app's runtime folder, which every
+// instance of the app shares.
+QString instanceSocket()
+{
+    const QByteArray app = qgetenv("FLATPAK_ID");
+    const QByteArray runtime = qgetenv("XDG_RUNTIME_DIR");
+    if (app.isEmpty() || runtime.isEmpty()) {
+        return instanceName;
+    }
+    return QStringLiteral("%1/app/%2/instance").arg(QString::fromLocal8Bit(runtime), QString::fromLocal8Bit(app));
+}
 const QString appIconPath = QStringLiteral(":/qt/qml/org/hepcat/icons/hepcat.svg");
 const QString trayIconPath = QStringLiteral(":/qt/qml/org/hepcat/icons/hepcat-symbolic.svg");
 
 QIcon appIcon()
 {
-    return QIcon::fromTheme(QStringLiteral("org.hepcat.Hepcat"), QIcon(appIconPath));
+    return QIcon::fromTheme(appId, QIcon(appIconPath));
 }
 
 // The tray icon is monochrome like Plasma's own; paint it in the panel's
@@ -84,15 +100,59 @@ private:
     std::function<void()> m_onChange;
 };
 
+bool inFlatpak()
+{
+    return QFile::exists(QStringLiteral("/.flatpak-info"));
+}
+
+// Natively: our login item. In a Flatpak the sandbox cannot see the host's
+// autostart folder, so this is only a marker of what we asked the portal for.
 QString autostartPath()
 {
+    if (inFlatpak()) {
+        return QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)
+            + QStringLiteral("/autostart-requested");
+    }
     return QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation)
-        + QStringLiteral("/autostart/org.hepcat.Hepcat.desktop");
+        + QStringLiteral("/autostart/") + appId + QStringLiteral(".desktop");
+}
+
+// Ask the desktop's Background portal to (not) start us at login.
+bool requestPortalAutostart(bool enabled)
+{
+    QDBusMessage call = QDBusMessage::createMethodCall(QStringLiteral("org.freedesktop.portal.Desktop"),
+                                                       QStringLiteral("/org/freedesktop/portal/desktop"),
+                                                       QStringLiteral("org.freedesktop.portal.Background"),
+                                                       QStringLiteral("RequestBackground"));
+    const QVariantMap options{
+        {QStringLiteral("reason"), QStringLiteral("Keep your audio routing and effects applied")},
+        {QStringLiteral("autostart"), enabled},
+        {QStringLiteral("commandline"), QStringList{QStringLiteral("hepcat"), QStringLiteral("--minimized")}},
+        {QStringLiteral("dbus-activatable"), false},
+    };
+    call << QString() << options;
+    const QDBusMessage reply = QDBusConnection::sessionBus().call(call);
+    if (reply.type() == QDBusMessage::ErrorMessage) {
+        qWarning("hepcat: background portal refused: %s", qPrintable(reply.errorMessage()));
+        return false;
+    }
+    return true;
 }
 
 bool setAutostart(bool enabled)
 {
     const QString path = autostartPath();
+    if (inFlatpak()) {
+        if (!requestPortalAutostart(enabled)) {
+            return false;
+        }
+        if (!enabled) {
+            return QFile::remove(path) || !QFile::exists(path);
+        }
+        QDir().mkpath(QFileInfo(path).absolutePath());
+        QFile marker(path);
+        return marker.open(QIODevice::WriteOnly);
+    }
     if (!enabled) {
         return QFile::remove(path) || !QFile::exists(path);
     }
@@ -106,19 +166,26 @@ bool setAutostart(bool enabled)
                               "Name=Hepcat\n"
                               "Comment=Keeps your audio routing applied\n"
                               "Exec=\"%1\" --minimized\n"
-                              "Icon=org.hepcat.Hepcat\n"
+                              "Icon=%2\n"
                               "X-KDE-autostart-phase=2\n")
-                   .arg(QCoreApplication::applicationFilePath())
+                   .arg(QCoreApplication::applicationFilePath(), appId)
                    .toUtf8());
     return true;
 }
 
-// Earlier builds were called Mixwire; carry over their login item.
+// Carry over the login item of earlier builds: when the app was called
+// Mixwire, and before it had a Flathub-style app ID.
 void migrateAutostart()
 {
-    const QString old = QFileInfo(autostartPath()).absolutePath() + QStringLiteral("/org.mixwire.Mixwire.desktop");
-    if (QFile::exists(old) && QFile::remove(old)) {
-        setAutostart(true);
+    if (inFlatpak()) {
+        return;
+    }
+    const QString dir = QFileInfo(autostartPath()).absolutePath();
+    for (const auto &name : {QStringLiteral("org.mixwire.Mixwire.desktop"), QStringLiteral("org.hepcat.Hepcat.desktop")}) {
+        const QString old = dir + QLatin1Char('/') + name;
+        if (QFile::exists(old) && QFile::remove(old)) {
+            setAutostart(true);
+        }
     }
 }
 
@@ -140,7 +207,7 @@ std::int32_t runApp(bool startHidden)
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("hepcat"));
     QApplication::setApplicationDisplayName(QStringLiteral("Hepcat"));
-    QApplication::setDesktopFileName(QStringLiteral("org.hepcat.Hepcat"));
+    QApplication::setDesktopFileName(appId);
     QApplication::setWindowIcon(appIcon());
 
     // A second launch just brings the running instance's window forward.
@@ -148,7 +215,7 @@ std::int32_t runApp(bool startHidden)
     const bool screenshot = !qEnvironmentVariableIsEmpty("HEPCAT_SCREENSHOT");
     if (!screenshot) {
         QLocalSocket probe;
-        probe.connectToServer(instanceName);
+        probe.connectToServer(instanceSocket());
         if (probe.waitForConnected(300)) {
             probe.write(startHidden ? "noop" : "show");
             probe.waitForBytesWritten(300);
@@ -177,8 +244,8 @@ std::int32_t runApp(bool startHidden)
     QLocalServer server;
     if (!screenshot) {
         migrateAutostart();
-        QLocalServer::removeServer(instanceName);
-        server.listen(instanceName);
+        QLocalServer::removeServer(instanceSocket());
+        server.listen(instanceSocket());
     }
     QObject::connect(&server, &QLocalServer::newConnection, &app, [&server, window] {
         QLocalSocket *client = server.nextPendingConnection();

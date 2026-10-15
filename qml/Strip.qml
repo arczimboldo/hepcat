@@ -31,17 +31,49 @@ QQC2.Control {
     property string outputLabel
     property bool online: true
     property bool micEnabled
+    // Mic-only: node.name of the mic and of its processed copy
+    property string micName
+    property string fxDevice
+    // Effects (mics, apps and buses): settings as JSON, and whether they run
+    property string fx
+    property bool fxActive
+    readonly property var fxSettings: fx ? JSON.parse(fx) : ({})
+    readonly property bool fxEnabled: fxSettings.enabled === true
+
+    // Human-readable list of the effects that actually change the sound.
+    function fxSummary() {
+        const f = fxSettings
+        const db = v => (v > 0 ? "+" : "") + Math.round(v) + " dB"
+        const parts = []
+        if (f.noise === "standard") parts.push("Noise suppression")
+        if (f.noise === "voice") parts.push("Voice isolation")
+        if (f.echo) parts.push("Echo cancellation")
+        if (f.gate) parts.push("Noise gate (" + Math.round(f.gate_db) + " dB)")
+        if (f.gain_db) parts.push("Gain " + db(f.gain_db))
+        if (f.auto_gain) parts.push("Automatic gain")
+        if (f.compressor > 0) parts.push("Compressor " + Math.round(f.compressor * 100) + "%")
+        const eq = [["Bass", f.bass_db], ["Presence", f.presence_db], ["Treble", f.treble_db]]
+            .filter(e => e[1]).map(e => e[0] + " " + db(e[1]))
+        if (eq.length) parts.push(eq.join(", "))
+        if (f.pitch) parts.push("Pitch " + (f.pitch > 0 ? "+" : "") + f.pitch + " st")
+        if (f.voice && f.voice !== "none")
+            parts.push(f.voice.charAt(0).toUpperCase() + f.voice.slice(1) + " effect"
+                       + (f.voice_mix < 1 ? " (" + Math.round(f.voice_mix * 100) + "%)" : ""))
+        return parts
+    }
     // Sources need the bus list to draw their routing buttons, buses need the outputs.
     property var busList
     property var outputChoices: []
 
     signal removeRequested()
+    signal effectsRequested()
 
     readonly property bool isSource: kind === "app" || kind === "mic"
 
     HoverHandler { id: stripHover }
 
-    implicitWidth: Kirigami.Units.gridUnit * 7
+    // Wide enough for the button row (buses have four buttons).
+    implicitWidth: Math.max(Kirigami.Units.gridUnit * 7, buttonRow.implicitWidth + leftPadding + rightPadding)
     padding: Kirigami.Units.smallSpacing * 2
 
     Kirigami.Theme.colorSet: Kirigami.Theme.View
@@ -78,6 +110,38 @@ QQC2.Control {
                 QQC2.ToolTip.text: strip.label
                 QQC2.ToolTip.visible: nameHover.hovered && truncated
                 HoverHandler { id: nameHover }
+            }
+            // Shown while effects are on; hover lists them, click edits them.
+            QQC2.AbstractButton {
+                id: fxBadge
+                visible: strip.fxEnabled
+                hoverEnabled: true
+                text: "FX"
+                padding: 0
+                leftPadding: Kirigami.Units.smallSpacing
+                rightPadding: Kirigami.Units.smallSpacing
+                // Faded while the effects are still starting.
+                opacity: strip.fxActive ? 1 : 0.5
+                onClicked: strip.effectsRequested()
+                contentItem: QQC2.Label {
+                    text: fxBadge.text
+                    font.pointSize: Kirigami.Theme.smallFont.pointSize
+                    font.weight: Font.Bold
+                    color: Kirigami.Theme.highlightedTextColor
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    radius: height / 2
+                    color: fxBadge.hovered ? Qt.lighter(Kirigami.Theme.highlightColor, 1.15) : Kirigami.Theme.highlightColor
+                }
+                QQC2.ToolTip.text: {
+                    const parts = strip.fxSummary()
+                    const head = strip.fxActive ? "Effects on" : "Effects starting…"
+                    return parts.length ? head + ":\n• " + parts.join("\n• ") : head + " (no changes yet; click to set them up)"
+                }
+                QQC2.ToolTip.visible: hovered
+                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
             }
             QQC2.ToolButton {
                 visible: strip.kind === "bus"
@@ -159,6 +223,7 @@ QQC2.Control {
         }
 
         RowLayout {
+            id: buttonRow
             Layout.alignment: Qt.AlignHCenter
             spacing: 0
             enabled: strip.online
@@ -177,16 +242,38 @@ QQC2.Control {
                 onToggled: strip.mixer.setMute(strip.ids, checked)
             }
             QQC2.ToolButton {
-                visible: strip.kind === "bus" || strip.kind === "output"
+                visible: strip.kind !== "app"
                 icon.name: strip.isDefault ? "starred-symbolic" : "non-starred-symbolic"
-                text: strip.isDefault ? "Default output" : "Make default output"
+                text: strip.kind === "mic"
+                    ? (strip.isDefault ? "Default microphone" : "Make default microphone")
+                    : (strip.isDefault ? "Default output" : "Make default output")
                 display: QQC2.AbstractButton.IconOnly
-                QQC2.ToolTip.text: strip.isDefault
-                    ? "New apps play here"
-                    : "Make this the default output, so new apps play here"
+                QQC2.ToolTip.text: strip.kind === "mic"
+                    ? (strip.isDefault ? "Apps record from here unless told otherwise"
+                                       : "Make this the default microphone" + (strip.fxActive ? ", with its effects" : ""))
+                    : (strip.isDefault ? "New apps play here"
+                                       : "Make this the default output, so new apps play here")
                 QQC2.ToolTip.visible: hovered
                 QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
-                onClicked: strip.mixer.setDefaultSink(strip.kind === "bus" ? strip.nodeName : strip.key)
+                onClicked: {
+                    if (strip.kind === "mic")
+                        strip.mixer.setDefaultSource(strip.fxActive && strip.fxDevice ? strip.fxDevice : strip.micName)
+                    else
+                        strip.mixer.setDefaultSink(strip.kind === "bus" ? strip.nodeName : strip.key)
+                }
+            }
+            QQC2.ToolButton {
+                visible: strip.kind !== "output"
+                checked: strip.fxEnabled
+                icon.name: "configure"
+                text: "Effects"
+                display: QQC2.AbstractButton.IconOnly
+                QQC2.ToolTip.text: (strip.fxEnabled ? "Effects are on" : "Effects") + ": "
+                    + (strip.kind === "mic" ? "noise suppression, echo cancellation, gain and voice changer"
+                                            : "noise suppression, gain, EQ and voice changer")
+                QQC2.ToolTip.visible: hovered
+                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                onClicked: strip.effectsRequested()
             }
             QQC2.ToolButton {
                 visible: strip.kind === "bus"
@@ -249,6 +336,8 @@ QQC2.Control {
             id: outputBox
             visible: strip.kind === "bus"
             Layout.fillWidth: true
+            // Long device names are elided rather than widening the strip.
+            Layout.preferredWidth: 0
             textRole: "label"
             valueRole: "name"
             model: {

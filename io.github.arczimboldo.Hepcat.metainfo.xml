@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.arczimboldo.Hepcat</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Hepcat</name>
+  <summary>Mix and route app audio, microphones and devices</summary>
+  <developer id="io.github.arczimboldo">
+    <name>arczimboldo</name>
+  </developer>
+  <description>
+    <p>
+      Hepcat is a Voicemeeter-style mixer for PipeWire with a native KDE Plasma look.
+      Instead of a node graph, it shows mixer strips for your microphones, applications,
+      virtual buses and output devices.
+    </p>
+    <ul>
+      <li>Send any app or microphone to one or more virtual buses, each with its own fader and output device</li>
+      <li>Offer a bus as a microphone, so Discord or OBS can record exactly what goes into it</li>
+      <li>Effects on microphones, apps and buses: noise suppression, AI voice isolation, echo cancellation, gain control, noise gate, compressor, EQ and a voice changer</li>
+      <li>Level meters on every strip</li>
+      <li>Routing is remembered per app and device, and reapplied when they come back</li>
+      <li>Keeps running in the system tray</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.arczimboldo.Hepcat.desktop</launchable>
+  <url type="homepage">https://github.com/arczimboldo/hepcat</url>
+  <url type="bugtracker">https://github.com/arczimboldo/hepcat/issues</url>
+  <url type="vcs-browser">https://github.com/arczimboldo/hepcat</url>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Mixer</category>
+  </categories>
+  <keywords>
+    <keyword>pipewire</keyword>
+    <keyword>mixer</keyword>
+    <keyword>routing</keyword>
+    <keyword>voicemeeter</keyword>
+    <keyword>noise suppression</keyword>
+  </keywords>
+  <content_rating type="oars-1.1"/>
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <releases>
+    <release version="0.1.0" date="2026-10-15">
+      <description>
+        <p>First release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

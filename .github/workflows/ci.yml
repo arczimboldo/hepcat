@@ -1,0 +1,21 @@
+# Builds and runs the tests on Arch Linux, where every dependency is current.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git rust clang pkgconf \
+            qt6-base qt6-declarative qt6-svg kirigami qqc2-desktop-style \
+            pipewire wireplumber webrtc-audio-processing-1
+      - uses: actions/checkout@v4
+      - name: Test
+        run: cargo test --locked --release

@@ -1,0 +1,30 @@
+# Builds the Flatpak on every push and pull request, and attaches the
+# installable bundle to GitHub releases (tags starting with "v").
+name: Flatpak
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  flatpak:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:kde-6.11
+      options: --privileged
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: hepcat.flatpak
+          manifest-path: packaging/flatpak/io.github.arczimboldo.Hepcat.yml
+          cache-key: flatpak-builder-${{ hashFiles('Cargo.lock', 'packaging/flatpak/*') }}
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: hepcat.flatpak

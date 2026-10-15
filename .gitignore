@@ -1,1 +1,9 @@
 /target
+build-dir/
+.flatpak-builder/
+# makepkg leftovers
+packaging/arch/*/src/
+packaging/arch/*/pkg/
+packaging/arch/*/hepcat-git/
+packaging/arch/*/*.tar.gz
+packaging/arch/*/*.pkg.tar.*

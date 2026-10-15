@@ -20,6 +20,8 @@ fn main() {
 /// output main alsa_output.usb-headset
 /// volume 42,43 0.5
 /// mic chat 1
+/// fx mic:alsa_input.usb-mic {"enabled":true,"noise":"voice","pitch":-4}
+/// fx app:Firefox {"enabled":true,"auto_gain":true}
 /// ```
 fn headless() {
     use engine::Command;
@@ -46,6 +48,14 @@ fn headless() {
             ["add-bus", label @ ..] => Command::AddBus { label: label.join(" ") },
             ["remove-bus", name] => Command::RemoveBus { name: name.to_string() },
             ["default", name] => Command::SetDefaultSink { name: name.to_string() },
+            ["default-source", name] => Command::SetDefaultSource { name: name.to_string() },
+            ["fx", key, json @ ..] => match serde_json::from_str(&json.join(" ")) {
+                Ok(fx) => Command::SetFx { key: key.to_string(), fx },
+                Err(e) => {
+                    eprintln!("hepcat: bad effects JSON: {e}");
+                    continue;
+                }
+            },
             [] => continue,
             _ => {
                 eprintln!("hepcat: unknown command: {line}");

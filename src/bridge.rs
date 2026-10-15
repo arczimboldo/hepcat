@@ -55,6 +55,16 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "setDefaultSink"]
         fn set_default_sink(self: &Mixer, name: &QString);
+
+        #[qinvokable]
+        #[cxx_name = "setDefaultSource"]
+        fn set_default_source(self: &Mixer, name: &QString);
+
+        /// `key` is `mic:…`, `app:…` or `bus:…`; `fx` the effects as JSON,
+        /// as found in the state snapshot.
+        #[qinvokable]
+        #[cxx_name = "setFx"]
+        fn set_fx(self: &Mixer, key: &QString, fx: &QString);
     }
 
     impl cxx_qt::Threading for Mixer {}
@@ -137,5 +147,16 @@ impl qobject::Mixer {
 
     fn set_default_sink(&self, name: &QString) {
         self.send(Command::SetDefaultSink { name: name.to_string() });
+    }
+
+    fn set_default_source(&self, name: &QString) {
+        self.send(Command::SetDefaultSource { name: name.to_string() });
+    }
+
+    fn set_fx(&self, key: &QString, fx: &QString) {
+        match serde_json::from_str(&fx.to_string()) {
+            Ok(fx) => self.send(Command::SetFx { key: key.to_string(), fx }),
+            Err(e) => eprintln!("hepcat: ignoring bad effects settings: {e}"),
+        }
     }
 }

@@ -1,0 +1,7 @@
+post_remove() {
+  cat <<'MSG'
+==> Hepcat's virtual buses ("… (Hepcat)" outputs) stay until PipeWire restarts.
+    Remove them now with:  systemctl --user restart pipewire wireplumber
+    Your settings are in ~/.config/hepcat; delete that folder to forget them.
+MSG
+}

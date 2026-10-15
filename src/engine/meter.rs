@@ -55,26 +55,8 @@ impl Meter {
             })
             .register()?;
 
-        let mut info = spa::param::audio::AudioInfoRaw::new();
-        info.set_format(spa::param::audio::AudioFormat::F32LE);
         // Stereo rather than mono: mixing L+R into one port would read 6 dB hot.
-        info.set_channels(2);
-        let mut position = [0; spa::param::audio::MAX_CHANNELS];
-        position[0] = spa::sys::SPA_AUDIO_CHANNEL_FL;
-        position[1] = spa::sys::SPA_AUDIO_CHANNEL_FR;
-        info.set_position(position);
-        let obj = spa::pod::Object {
-            type_: spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
-            id: spa::param::ParamType::EnumFormat.as_raw(),
-            properties: info.into(),
-        };
-        let bytes: Vec<u8> = spa::pod::serialize::PodSerializer::serialize(
-            std::io::Cursor::new(Vec::new()),
-            &spa::pod::Value::Object(obj),
-        )
-        .map_err(|_| pw::Error::CreationFailed)?
-        .0
-        .into_inner();
+        let bytes = super::format::f32_audio(&super::format::STEREO, None)?;
         let mut params = [Pod::from_bytes(&bytes).ok_or(pw::Error::CreationFailed)?];
         stream.connect(
             spa::utils::Direction::Input,
@@ -93,10 +75,14 @@ impl Meter {
 
     /// Take the peak seen since the last call and return the level to show.
     pub fn take_level(&mut self) -> f32 {
-        let peak = self.peak.replace(0.0);
-        let instant = if peak > 0.0 { ((20.0 * peak.log10() + 60.0) / 60.0).clamp(0.0, 1.0) } else { 0.0 };
-        // Rise instantly, fall smoothly.
-        self.level = instant.max(self.level - 0.06).max(0.0);
-        self.level
+        display_level(self.peak.replace(0.0), &mut self.level)
     }
+}
+
+/// Turn a peak sample into a 0..1 meter level on a -60..0 dB scale that
+/// rises instantly and falls smoothly from `level`.
+pub fn display_level(peak: f32, level: &mut f32) -> f32 {
+    let instant = if peak > 0.0 { ((20.0 * peak.log10() + 60.0) / 60.0).clamp(0.0, 1.0) } else { 0.0 };
+    *level = instant.max(*level - 0.06).max(0.0);
+    *level
 }

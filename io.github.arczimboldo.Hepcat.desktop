@@ -4,6 +4,6 @@ Name=Hepcat
 GenericName=Audio Mixer
 Comment=Route and mix app audio, microphones and devices
 Exec=hepcat
-Icon=org.hepcat.Hepcat
+Icon=io.github.arczimboldo.Hepcat
 Categories=AudioVideo;Audio;Mixer;Qt;KDE;
 Keywords=audio;mixer;pipewire;routing;volume;voicemeeter;

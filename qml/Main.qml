@@ -46,7 +46,7 @@ Kirigami.ApplicationWindow {
             const out = {}
             for (const k in item) {
                 const v = item[k]
-                out[k] = !Array.isArray(v) ? v : (k === "ids" ? v.join(",") : "|" + v.join("|") + "|")
+                out[k] = !Array.isArray(v) ? v : (k === "ids" || k === "meterIds" ? v.join(",") : "|" + v.join("|") + "|")
             }
             return out
         })
@@ -102,6 +102,11 @@ Kirigami.ApplicationWindow {
         }
     }
 
+    EffectsDialog {
+        id: effectsDialog
+        mixer: backend
+    }
+
     Kirigami.PromptDialog {
         id: removeBusDialog
         property string busName
@@ -148,14 +153,20 @@ Kirigami.ApplicationWindow {
                             mixer: backend
                             busList: busModel
                             key: model.key
+                            micName: model.name
                             label: model.label
                             icon: model.icon
                             ids: model.ids
                             volume: model.volume
                             mute: model.mute
-                            level: root.levelOf(model.ids)
+                            level: root.levelOf(model.meterIds)
                             buses: model.buses
+                            isDefault: model.isDefault
+                            fx: model.fx
+                            fxActive: model.fxActive
+                            fxDevice: model.fxDevice
                             Layout.fillHeight: true
+                            onEffectsRequested: effectsDialog.openFor(model.key, "mic", model.label, model.fx)
                         }
                     }
                 }
@@ -182,10 +193,13 @@ Kirigami.ApplicationWindow {
                             ids: model.ids
                             volume: model.volume
                             mute: model.mute
-                            level: root.levelOf(model.ids)
+                            level: root.levelOf(model.meterIds)
                             buses: model.buses
                             direct: model.direct
+                            fx: model.fx
+                            fxActive: model.fxActive
                             Layout.fillHeight: true
+                            onEffectsRequested: effectsDialog.openFor(model.key, "app", model.label, model.fx)
                         }
                     }
                 }
@@ -210,13 +224,16 @@ Kirigami.ApplicationWindow {
                             ids: model.ids
                             volume: model.volume
                             mute: model.mute
-                            level: root.levelOf(model.ids)
+                            level: root.levelOf(model.meterIds)
                             output: model.output
                             outputLabel: model.outputLabel
                             online: model.online
                             micEnabled: model.mic
                             isDefault: model.isDefault
+                            fx: model.fx
+                            fxActive: model.fxActive
                             Layout.fillHeight: true
+                            onEffectsRequested: effectsDialog.openFor("bus:" + model.name, "bus", model.label, model.fx)
                             onRemoveRequested: {
                                 removeBusDialog.busName = model.name
                                 removeBusDialog.busLabel = model.label
