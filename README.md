@@ -35,20 +35,25 @@ makepkg -si
 
 Instead of a node graph, Hepcat shows mixer strips:
 
-- **Microphones** and **Applications** are sources. Each has a fader, mute and
-  one button per bus. Click buttons to send the source to one or more buses.
+- **Microphones** (every input source, real or virtual) and **Applications**
+  are sources. Each has a fader, mute and one button per bus. Click buttons
+  to send the source to one or more buses.
 - **Buses** are virtual outputs that Hepcat creates (they appear as normal
   output devices, e.g. "Main (Hepcat)"). Each bus has a fader and a picker
-  for the hardware device it plays to. Star a bus to make it the system
-  default, so every new app plays into it.
+  for the hardware device it plays to.
 - **Outputs** are your real devices.
 - Every strip has a **level meter** next to its fader.
-- The 🎤 button on a bus offers it as a **microphone** ("Chat (Hepcat mic)"),
-  so Discord, OBS or a browser can record exactly what goes into that bus.
-- The ⚙ button on a microphone, app or bus opens its **effects**:
-  - On a **microphone**, switching effects on adds a processed copy of the
-    mic, "Headset (Hepcat FX)". Buses the mic is sent to get the processed
-    sound, and it becomes the default microphone if the raw one was.
+- The **star** button on an input, bus or output makes it the system
+  default, so new apps record from or play to it.
+- The **Use as microphone** button on a bus offers the bus as an input
+  ("Chat (Hepcat mic)"), so Discord, OBS or a browser can record exactly what
+  goes into that bus.
+- The **Effects** button (the settings icon) on an input, app or bus opens
+  its effects. While they are on, an **FX** badge next to the name lists them
+  on hover.
+  - On an **input**, switching effects on adds a processed copy,
+    "Headset (Hepcat FX)". Buses the input is sent to get the processed
+    sound, and it becomes the default input if the raw one was.
   - An **app** plays into "Firefox (Hepcat FX)" instead, and the processed
     sound goes to its buses, or to the default output if it has none. Use it
     to clean up a noisy voice in a call, even out a quiet video, or EQ music.
@@ -59,14 +64,13 @@ Instead of a node graph, Hepcat shows mixer strips:
     and lets every other sound through, claps and music included. *Voice
     isolation* uses RNNoise, a neural network, and keeps only speech, much
     like Discord's Krisp.
-  - **Echo cancellation** (microphones only). Removes what your speakers play
-    from the mic.
+  - **Echo cancellation** (inputs only). Removes what your speakers play
+    from the microphone.
   - **Noise gate.**
   - **Gain**, automatic gain control and a compressor.
   - **Tone:** bass, presence and treble.
   - **Voice changer:** pitch shift plus robot, alien, radio, telephone,
     megaphone, underwater, echo and hall effects, with a wet/dry mix.
-- The ☆ on a microphone makes it the default input.
 
 Closing the window keeps Hepcat running in the **system tray**, so rules keep
 being applied (for example when headphones reconnect). Use "Start at Login" in
