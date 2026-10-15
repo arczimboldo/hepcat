@@ -1,7 +1,7 @@
 # Maintainer: arczimboldo <https://github.com/arczimboldo>
 
 pkgname=hepcat
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc='Voicemeeter-style audio mixer for PipeWire with effects and a native KDE Plasma look'
 arch=('x86_64' 'aarch64')
@@ -27,7 +27,7 @@ options=('!lto')
 install=hepcat.install
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 # For a new release: set pkgver, then run `updpkgsums`.
-sha256sums=('0dd5eee858d785b48ac8ab9a46c72436bcb9547209253edc91fd59d78dd881fd')
+sha256sums=('db86f5a54d7f7a6b7af2d3b3536d1827090fe78dbda3ac479ebfd21e04b2c1f4')
 
 prepare() {
   cd "$pkgname-$pkgver"
