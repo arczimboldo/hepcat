@@ -382,11 +382,15 @@ fn on_global(state: &Rc<RefCell<State>>, global: &pw::registry::GlobalObject<&sp
                                 st.graph.stream_targets.remove(&subject);
                             }
                         },
-                        // A `None` key means the whole metadata was cleared.
+                        // A `None` key removes every key of `subject`; WirePlumber
+                        // sends one whenever a stream with a target goes away.
+                        // Only subject 0 holds the defaults.
                         None => {
-                            st.graph.default_sink = None;
-                            st.graph.default_source = None;
-                            st.graph.stream_targets.clear();
+                            if subject == 0 {
+                                st.graph.default_sink = None;
+                                st.graph.default_source = None;
+                            }
+                            st.graph.stream_targets.remove(&subject);
                         }
                         _ => return 0,
                     }
@@ -512,7 +516,13 @@ impl State {
         }
         self.dirty = false;
         if self.config.is_none() {
-            let cfg = Config::first_run(self.graph.default_sink.clone());
+            // The default sink may be a bus left over from another Hepcat
+            // (the Flatpak, say); buses must play to a real device.
+            let is_output = |name: &str| self.graph.node_by_name(name).is_some_and(|n| n.kind() == Some(Kind::Output));
+            let output = self.graph.default_sink.clone().filter(|name| is_output(name)).or_else(|| {
+                self.graph.nodes.values().find(|n| n.kind() == Some(Kind::Output)).map(|n| n.name.clone())
+            });
+            let cfg = Config::first_run(output);
             cfg.save();
             self.config = Some(cfg);
         }
@@ -648,9 +658,7 @@ impl State {
             eprintln!("hepcat: effects for unknown strip {key:?}");
             return;
         };
-        let mut fx = fx.sanitized();
-        // Echo cancellation removes the speakers from a microphone; nothing else has an echo.
-        fx.echo &= matches!(target, FxTarget::Mic(_));
+        let fx = fx.sanitized();
         let was_enabled = self.config().active_fx(&key).is_some();
         match target {
             FxTarget::Mic(mic) => {

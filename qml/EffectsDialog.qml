@@ -150,13 +150,14 @@ Kirigami.Dialog {
             }
 
             QQC2.CheckBox {
-                visible: dialog.isMic
                 Kirigami.FormData.label: "Echo:"
                 text: "Remove sound from my speakers"
                 enabled: dialog.on
                 checked: dialog.settings.echo === true
                 onToggled: dialog.set("echo", checked)
-                QQC2.ToolTip.text: "Echo cancellation: whatever plays on the default output is removed from the microphone, so people don't hear themselves when you aren't using headphones."
+                QQC2.ToolTip.text: "Echo cancellation: whatever plays on the default output is removed from "
+                    + (dialog.isMic ? "the microphone" : "this " + dialog.kind + "'s sound, for when it carries a microphone (a phone mirrored with scrcpy, for example)")
+                    + ", so people don't hear themselves. Its own sound is never removed, even when you listen to it."
                 QQC2.ToolTip.visible: hovered
                 QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
             }

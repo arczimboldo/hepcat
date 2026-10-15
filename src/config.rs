@@ -120,7 +120,7 @@ pub struct Effects {
     /// Automatic gain control: keeps speech at a steady level.
     pub auto_gain: bool,
     pub noise: NoiseMode,
-    /// Remove what the speakers play from the microphone signal.
+    /// Remove what the speakers play (other than this strip itself) from the signal.
     pub echo: bool,
     pub gate: bool,
     /// The gate opens above this level, in dBFS.

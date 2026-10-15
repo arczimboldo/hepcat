@@ -470,13 +470,52 @@ impl Graph {
         }
 
         if let Some(reference) = fx.reference {
-            let from = self.echo_reference(config);
-            if let Some(from) = from {
-                self.want_links(from, reference, plan);
+            // The echo is whatever plays on the speakers, except this strip's
+            // own sound: when it is heard there too (a mic or a phone sent to
+            // a bus you listen to), cancelling it would silence it.
+            let mut keep = vec![];
+            if let Some(device) = self.echo_reference(config) {
+                let heard = self.sources_of(device);
+                let own = fx.input.map(|input| self.sources_of(input)).unwrap_or_default();
+                for id in heard.difference(&own) {
+                    self.want_links(&self.nodes[id], reference, plan);
+                    keep.push(*id);
+                }
             }
-            // Follow the default output when it changes.
-            self.unlink_into(reference, &from.map(|f| f.id).into_iter().collect::<Vec<_>>(), plan);
+            // Follow the default output and what plays on it.
+            self.unlink_into(reference, &keep, plan);
         }
+    }
+
+    /// The streams and inputs whose sound ends up in `node`, followed back
+    /// through buses, virtual devices and effects.
+    pub fn sources_of(&self, node: &NodeInfo) -> BTreeSet<u32> {
+        let mut seen = BTreeSet::from([node.id]);
+        let mut sources = BTreeSet::new();
+        let mut queue = vec![node.id];
+        while let Some(id) = queue.pop() {
+            for link in self.links.values().filter(|l| l.in_node == id) {
+                let Some(from) = self.nodes.get(&link.out_node) else { continue };
+                if !seen.insert(from.id) {
+                    continue;
+                }
+                match from.kind() {
+                    Some(Kind::Bus | Kind::Output | Kind::FxDevice) => queue.push(from.id),
+                    // Effects output: what went into the effects.
+                    Some(Kind::FxOut) => {
+                        let input = from.name.strip_prefix(FX_OUT_PREFIX).map(|slug| format!("{FX_IN_PREFIX}{slug}"));
+                        if let Some(input) = input.and_then(|name| self.node_by_name(&name)) {
+                            queue.push(input.id);
+                        }
+                    }
+                    Some(Kind::Meter | Kind::FxIn | Kind::FxRef | Kind::BusMic) => {}
+                    _ => {
+                        sources.insert(from.id);
+                    }
+                }
+            }
+        }
+        sources
     }
 
     /// Remove links into `node` from anything but `keep`.
@@ -781,18 +820,53 @@ mod tests {
         assert_eq!(into(&plan, 18), vec![(16, 161)]); // and to the bus mic
     }
 
-    #[test]
-    fn echo_reference_is_the_output_behind_the_default_bus() {
+    /// Main plays to the headphones; Spotify plays into main.
+    fn listening_graph() -> Graph {
         let mut g = graph();
-        let key = "mic:alsa_input.mic";
-        g.nodes.insert(10, node(10, &FxNames::new(key).reference, "Stream/Input/Audio/Effects"));
-        stereo(&mut g, 10, 100, false, false);
         g.default_sink = Some("hepcat.bus.main".into());
-        g.links.insert(97, LinkInfo { id: 97, out_node: 5, out_port: 52, in_node: 10, in_port: 100 });
+        g.links.insert(90, LinkInfo { id: 90, out_node: 4, out_port: 42, in_node: 3, in_port: 30 });
+        g.links.insert(91, LinkInfo { id: 91, out_node: 1, out_port: 10, in_node: 4, in_port: 40 });
+        g.links.insert(92, LinkInfo { id: 92, out_node: 1, out_port: 11, in_node: 4, in_port: 41 });
+        g
+    }
+
+    fn add_reference(g: &mut Graph, key: &str, id: u32) {
+        g.nodes.insert(id, node(id, &FxNames::new(key).reference, "Stream/Input/Audio/Effects"));
+        stereo(g, id, id * 10, false, false);
+    }
+
+    #[test]
+    fn echo_reference_is_what_plays_on_the_speakers() {
+        let mut g = listening_graph();
+        let key = "mic:alsa_input.mic";
+        add_reference(&mut g, key, 17);
+        // An old link from the bus monitor goes.
+        g.links.insert(97, LinkInfo { id: 97, out_node: 5, out_port: 52, in_node: 17, in_port: 170 });
         let plan = g.plan(&with_fx(config(), key));
-        let into: Vec<_> = plan.create.iter().filter(|p| p.in_node == 10).map(|p| p.out_port).collect();
-        assert_eq!(into, vec![32, 33]); // headphones monitor
+        assert_eq!(into(&plan, 17), vec![(1, 10), (1, 11)]); // Spotify, found through main
         assert!(plan.destroy.contains(&97));
+    }
+
+    #[test]
+    fn echo_reference_leaves_out_the_strips_own_sound() {
+        // A phone app with effects plays to main next to Spotify.
+        let mut g = listening_graph();
+        let key = "app:Phone";
+        let mut phone = node(19, "phone", "Stream/Output/Audio");
+        phone.app_name = Some("Phone".into());
+        g.nodes.insert(19, phone);
+        stereo(&mut g, 19, 190, true, false);
+        add_fx(&mut g, key, 11, Some("Audio/Sink"), &["FL", "FR"]);
+        add_reference(&mut g, key, 18);
+        // phone → its virtual output → effects → main
+        g.links.insert(80, LinkInfo { id: 80, out_node: 19, out_port: 190, in_node: 11, in_port: 110 });
+        g.links.insert(81, LinkInfo { id: 81, out_node: 11, out_port: 112, in_node: 12, in_port: 120 });
+        g.links.insert(82, LinkInfo { id: 82, out_node: 13, out_port: 130, in_node: 4, in_port: 40 });
+        let mut cfg = with_fx(config(), key);
+        cfg.routes.insert(key.into(), vec!["main".into()]);
+        let plan = g.plan(&cfg);
+        assert_eq!(into(&plan, 18), vec![(1, 10), (1, 11)]); // only Spotify
+        assert_eq!(g.sources_of(&g.nodes[&3]), BTreeSet::from([1, 19]));
     }
 
     #[test]

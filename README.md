@@ -64,8 +64,10 @@ Instead of a node graph, Hepcat shows mixer strips:
     and lets every other sound through, claps and music included. *Voice
     isolation* uses RNNoise, a neural network, and keeps only speech, much
     like Discord's Krisp.
-  - **Echo cancellation** (inputs only). Removes what your speakers play
-    from the microphone.
+  - **Echo cancellation.** Removes what your speakers play from an input, or
+    from an app or bus that carries a microphone (a phone mirrored with
+    scrcpy, for example). The strip's own sound is never removed, even when
+    you listen to it.
   - **Noise gate.**
   - **Gain**, automatic gain control and a compressor.
   - **Tone:** bass, presence and treble.
@@ -113,9 +115,9 @@ restarts or a device comes back, so nothing has to be rewired by hand.
   uses) handles echo, standard noise suppression and AGC. `nnnoiseless`
   handles voice isolation, and the rest is plain Rust DSP. A playback stream
   feeds the result into a null `Audio/Source/Virtual` node. For echo
-  cancellation, a passive capture of the default output's monitor is the
-  reference; when the default output is a bus, Hepcat uses that bus's device,
-  so every bus that plays there is cancelled.
+  cancellation, the reference is every stream and input that reaches the
+  default output's device (followed back through buses and effects), linked
+  passively into a capture stream, minus whatever feeds the strip itself.
 
 ## Build and run
 
