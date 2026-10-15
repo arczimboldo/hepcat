@@ -48,6 +48,11 @@
     <control>keyboard</control>
   </supports>
   <releases>
+    <release version="0.1.1" date="2026-10-15">
+      <description>
+        <p>Echo cancellation for apps and buses, for an app that carries a microphone such as a phone mirrored with scrcpy. The default output and input are no longer forgotten when a stream closes.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-10-15">
       <description>
         <p>First release.</p>
