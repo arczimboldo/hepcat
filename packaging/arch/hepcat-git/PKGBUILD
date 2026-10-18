@@ -9,6 +9,8 @@ url='https://github.com/arczimboldo/hepcat'
 license=('MIT')
 depends=(
   'glibc'
+  'kdeclarative'
+  'kglobalaccel'
   'kirigami'
   'libgcc'
   'libpipewire'

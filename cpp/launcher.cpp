@@ -6,6 +6,7 @@
 // Plasma theme, colours and fonts, and for QSystemTrayIcon.
 
 #include "hepcat/cpp/launcher.h"
+#include "hepcat/cpp/shortcuts.h"
 
 #include <QAction>
 #include <QApplication>
@@ -240,6 +241,7 @@ std::int32_t runApp(bool startHidden)
         return 1;
     }
     auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+    setShortcutReceiver(window);
 
     QLocalServer server;
     if (!screenshot) {

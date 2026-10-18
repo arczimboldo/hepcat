@@ -52,6 +52,22 @@ pub struct Config {
     /// Strip key (`mic:<node.name>`, `app:<name>` or `bus:<name>`) -> its effects.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fx: BTreeMap<String, Effects>,
+    /// Every app seen playing (`app:<name>` -> how it looked), offered when
+    /// adding an app by hand, and the ones kept in the mixer while silent.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub apps: BTreeMap<String, KnownApp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct KnownApp {
+    pub label: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub icon: String,
+    /// Shown in the mixer even while it plays nothing, e.g. a game that is
+    /// only heard while it has focus.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub kept: bool,
 }
 
 /// What a key in [`Config::fx`] applies to.
@@ -244,6 +260,7 @@ impl Config {
             ],
             routes: BTreeMap::new(),
             fx: BTreeMap::new(),
+            apps: BTreeMap::new(),
         }
     }
 
@@ -280,5 +297,19 @@ impl Config {
             n += 1;
         }
         name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kept_apps_survive_a_round_trip() {
+        let mut cfg = Config::first_run(None);
+        cfg.apps.insert("app:Some Game".into(), KnownApp { label: "Some Game".into(), icon: String::new(), kept: true });
+        cfg.routes.insert("app:Some Game".into(), vec!["main".into()]);
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert_eq!(toml::from_str::<Config>(&text).unwrap(), cfg);
     }
 }

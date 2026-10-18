@@ -14,7 +14,7 @@ jobs:
       - name: Install dependencies
         run: |
           pacman -Syu --noconfirm --needed base-devel git rust clang pkgconf \
-            qt6-base qt6-declarative qt6-svg kirigami qqc2-desktop-style \
+            qt6-base qt6-declarative qt6-svg kirigami qqc2-desktop-style kglobalaccel kdeclarative \
             pipewire wireplumber webrtc-audio-processing-1
       - uses: actions/checkout@v4
       - name: Test

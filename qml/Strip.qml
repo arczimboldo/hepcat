@@ -32,6 +32,10 @@ QQC2.Control {
     property string outputLabel
     property bool online: true
     property bool micEnabled
+    // App-only: whether it plays right now, and whether it was added by hand
+    // to stay in the mixer while silent.
+    property bool running: true
+    property bool kept: false
     // Mic-only: node.name of the mic and of its processed copy
     property string micName
     property string fxDevice
@@ -71,31 +75,29 @@ QQC2.Control {
     property bool compact: false
     property bool canMoveBack: false
     property bool canMoveForward: false
-    // Show the grip on the bottom edge (for strips with a set height).
-    property bool heightResizable: false
+    // Strips follow each other top to bottom (tiles in columns).
+    property bool movesVertically: false
 
     signal removeRequested()
+    signal renameRequested()
+    signal forgetRequested()
     signal effectsRequested()
     signal hideRequested()
-    // -1 to move left, +1 to move right.
+    // -1 to move back (left or up), +1 to move forward.
     signal moveRequested(int delta)
-    // New size in pixels: 0 resets that dimension, -1 leaves it alone.
-    signal resizeRequested(real width, real height)
 
     readonly property bool isSource: kind === "app" || kind === "mic"
-    // The narrowest and shortest the strip gets with everything still usable.
+    // The narrowest the strip gets with everything still usable.
     readonly property real minimumWidth: compact
         ? Kirigami.Units.gridUnit * 10
         : buttonRow.implicitWidth + leftPadding + rightPadding
-    readonly property real minimumHeight: Kirigami.Units.gridUnit * 10
 
-    HoverHandler { id: stripHover }
     TapHandler {
         acceptedButtons: Qt.RightButton
         onTapped: stripMenu.popup()
     }
 
-    implicitWidth: compact ? Kirigami.Units.gridUnit * 15 : Math.max(Kirigami.Units.gridUnit * 7, minimumWidth)
+    implicitWidth: compact ? Kirigami.Units.gridUnit * 15 : Math.max(Kirigami.Units.gridUnit * 8, minimumWidth)
     padding: Kirigami.Units.smallSpacing * 2
 
     Kirigami.Theme.colorSet: Kirigami.Theme.View
@@ -118,20 +120,34 @@ QQC2.Control {
             onTriggered: strip.hideRequested()
         }
         QQC2.MenuItem {
-            text: "Move Left"
-            icon.name: "go-previous"
+            text: strip.movesVertically ? "Move Up" : "Move Left"
+            icon.name: strip.movesVertically ? "go-up" : "go-previous"
             enabled: strip.canMoveBack
             onTriggered: strip.moveRequested(-1)
         }
         QQC2.MenuItem {
-            text: "Move Right"
-            icon.name: "go-next"
+            text: strip.movesVertically ? "Move Down" : "Move Right"
+            icon.name: strip.movesVertically ? "go-down" : "go-next"
             enabled: strip.canMoveForward
             onTriggered: strip.moveRequested(1)
         }
         QQC2.MenuSeparator {
+            visible: strip.kind === "bus" || strip.kept
+            height: visible ? implicitHeight : 0
+        }
+        QQC2.MenuItem {
+            visible: strip.kept
+            height: visible ? implicitHeight : 0
+            text: strip.running ? "Don't Keep When Silent" : "Remove from Mixer"
+            icon.name: strip.running ? "window-unpin" : "list-remove"
+            onTriggered: strip.forgetRequested()
+        }
+        QQC2.MenuItem {
             visible: strip.kind === "bus"
             height: visible ? implicitHeight : 0
+            text: "Rename Bus…"
+            icon.name: "edit-rename"
+            onTriggered: strip.renameRequested()
         }
         QQC2.MenuItem {
             visible: strip.kind === "bus"
@@ -142,53 +158,36 @@ QQC2.Control {
         }
     }
 
-    // A drag handle on the right or bottom edge; double-click resets.
-    component Grip: MouseArea {
-        id: grip
-        property bool horizontal: true
-        property real startPos
-        property real startSize
-        z: 1
+    // Shown while effects are on; hover lists them, click edits them.
+    component FxBadge: QQC2.AbstractButton {
+        id: fxBadge
         hoverEnabled: true
-        cursorShape: horizontal ? Qt.SizeHorCursor : Qt.SizeVerCursor
-        onPressed: mouse => {
-            const p = mapToGlobal(mouse.x, mouse.y)
-            startPos = horizontal ? p.x : p.y
-            startSize = horizontal ? strip.width : strip.height
+        text: "FX"
+        padding: 0
+        leftPadding: Kirigami.Units.smallSpacing
+        rightPadding: Kirigami.Units.smallSpacing
+        // Faded while the effects are still starting.
+        opacity: strip.fxActive ? 1 : 0.5
+        onClicked: strip.effectsRequested()
+        contentItem: QQC2.Label {
+            text: fxBadge.text
+            font.pointSize: Kirigami.Theme.smallFont.pointSize
+            font.weight: Font.Bold
+            color: Kirigami.Theme.highlightedTextColor
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
         }
-        onPositionChanged: mouse => {
-            if (!pressed)
-                return
-            const p = mapToGlobal(mouse.x, mouse.y)
-            const size = startSize + (horizontal ? p.x : p.y) - startPos
-            if (horizontal)
-                strip.resizeRequested(Math.max(strip.minimumWidth, size), -1)
-            else
-                strip.resizeRequested(-1, Math.max(strip.minimumHeight, size))
+        background: Rectangle {
+            radius: height / 2
+            color: fxBadge.hovered ? Qt.lighter(Kirigami.Theme.highlightColor, 1.15) : Kirigami.Theme.highlightColor
         }
-        onDoubleClicked: horizontal ? strip.resizeRequested(0, -1) : strip.resizeRequested(-1, 0)
-
-        Rectangle {
-            anchors.centerIn: parent
-            width: grip.horizontal ? 2 : parent.width - Kirigami.Units.cornerRadius * 2
-            height: grip.horizontal ? parent.height - Kirigami.Units.cornerRadius * 2 : 2
-            color: Kirigami.Theme.highlightColor
-            visible: grip.containsMouse || grip.pressed
+        QQC2.ToolTip.text: {
+            const parts = strip.fxSummary()
+            const head = strip.fxActive ? "Effects on" : "Effects starting…"
+            return parts.length ? head + ":\n• " + parts.join("\n• ") : head + " (no changes yet; click to set them up)"
         }
-        QQC2.ToolTip.text: "Drag to resize all " + ({ app: "apps", mic: "inputs", bus: "buses", output: "outputs" })[strip.kind]
-            + "; double-click to reset"
-        QQC2.ToolTip.visible: containsMouse && !pressed
-        QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay * 2
-    }
-    Grip {
-        anchors { top: parent.top; bottom: parent.bottom; right: parent.right; rightMargin: -width / 2 }
-        width: Kirigami.Units.smallSpacing * 2
-    }
-    Grip {
-        visible: strip.heightResizable
-        horizontal: false
-        anchors { left: parent.left; right: parent.right; bottom: parent.bottom; bottomMargin: -height / 2 }
-        height: Kirigami.Units.smallSpacing * 2
+        QQC2.ToolTip.visible: hovered
+        QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
     }
 
     contentItem: ColumnLayout {
@@ -214,63 +213,45 @@ QQC2.Control {
                 QQC2.ToolTip.visible: nameHover.hovered && truncated
                 HoverHandler { id: nameHover }
             }
-            // Shown while effects are on; hover lists them, click edits them.
-            QQC2.AbstractButton {
-                id: fxBadge
-                visible: strip.fxEnabled
-                hoverEnabled: true
-                text: "FX"
-                padding: 0
-                leftPadding: Kirigami.Units.smallSpacing
-                rightPadding: Kirigami.Units.smallSpacing
-                // Faded while the effects are still starting.
-                opacity: strip.fxActive ? 1 : 0.5
-                onClicked: strip.effectsRequested()
-                contentItem: QQC2.Label {
-                    text: fxBadge.text
-                    font.pointSize: Kirigami.Theme.smallFont.pointSize
-                    font.weight: Font.Bold
-                    color: Kirigami.Theme.highlightedTextColor
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                }
-                background: Rectangle {
-                    radius: height / 2
-                    color: fxBadge.hovered ? Qt.lighter(Kirigami.Theme.highlightColor, 1.15) : Kirigami.Theme.highlightColor
-                }
-                QQC2.ToolTip.text: {
-                    const parts = strip.fxSummary()
-                    const head = strip.fxActive ? "Effects on" : "Effects starting…"
-                    return parts.length ? head + ":\n• " + parts.join("\n• ") : head + " (no changes yet; click to set them up)"
-                }
-                QQC2.ToolTip.visible: hovered
-                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+            // In a tile, the effects badge sits next to the name.
+            FxBadge {
+                visible: strip.fxEnabled && strip.compact
             }
-            // Only takes room while the pointer is over the strip.
             QQC2.ToolButton {
-                visible: stripHover.hovered || stripMenu.visible
                 icon.name: "overflow-menu"
                 display: QQC2.AbstractButton.IconOnly
                 text: "More"
                 padding: 0
                 Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium + Kirigami.Units.smallSpacing * 2
                 Layout.preferredHeight: Layout.preferredWidth
-                QQC2.ToolTip.text: (strip.kind === "bus" ? "Hide, move or remove" : "Hide or move") + " (also on right-click)"
+                QQC2.ToolTip.text: (strip.kind === "bus" ? "Hide, move, rename or remove" : "Hide or move") + " (also on right-click)"
                 QQC2.ToolTip.visible: hovered
                 QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                 onClicked: stripMenu.visible ? stripMenu.close() : stripMenu.popup(this, 0, height)
             }
         }
 
-        // In a fader strip this is laid out even when empty, so faders line up.
-        QQC2.Label {
-            text: strip.kind === "bus" && !strip.online ? "Starting…"
-                : strip.detail !== strip.label ? strip.detail : ""
-            visible: !strip.compact || text.length > 0
-            elide: Text.ElideRight
-            opacity: 0.7
-            font: Kirigami.Theme.smallFont
+        // In a fader strip this is laid out even when empty, so faders line
+        // up, and holds the effects badge.
+        RowLayout {
+            visible: !strip.compact || detailLabel.text.length > 0
+            spacing: Kirigami.Units.smallSpacing
             Layout.fillWidth: true
+
+            QQC2.Label {
+                id: detailLabel
+                text: strip.kind === "bus" && !strip.online ? "Starting…"
+                    : strip.detail !== strip.label ? strip.detail : ""
+                elide: Text.ElideRight
+                opacity: 0.7
+                font: Kirigami.Theme.smallFont
+                Layout.fillWidth: true
+            }
+            FxBadge {
+                visible: strip.fxEnabled && !strip.compact
+                // No taller than the line, so faders stay level across strips.
+                Layout.maximumHeight: detailLabel.implicitHeight
+            }
         }
 
         // Strip: fader, percentage, buttons, then routing, top to bottom.
@@ -290,7 +271,7 @@ QQC2.Control {
                 volume: strip.volume
                 level: strip.level
                 mute: strip.mute
-                enabled: strip.online
+                enabled: strip.online && strip.running
                 Layout.fillHeight: !strip.compact
                 Layout.fillWidth: strip.compact
                 Layout.minimumHeight: strip.compact ? 0 : Kirigami.Units.gridUnit * 4
@@ -300,7 +281,7 @@ QQC2.Control {
             QQC2.Label {
                 Layout.row: strip.compact ? 0 : 1
                 Layout.column: strip.compact ? 2 : 0
-                text: Math.round(fader.value * 100) + "%"
+                text: strip.running ? Math.round(fader.value * 100) + "%" : "–"
                 font.features: { "tnum": 1 }
                 horizontalAlignment: Text.AlignRight
                 Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
@@ -318,6 +299,7 @@ QQC2.Control {
                 enabled: strip.online
 
                 QQC2.ToolButton {
+                    enabled: strip.running
                     checkable: true
                     checked: strip.mute
                     icon.name: strip.kind === "mic"

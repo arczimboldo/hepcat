@@ -16,12 +16,10 @@ ColumnLayout {
     // Strips wrap into rows (the page scrolls down) instead of forming one row.
     property bool wrap: false
     property bool compact: false
-    // Size the user dragged the strips to, in pixels; 0 for the default.
-    property real customWidth: 0
-    property real customHeight: 0
-    // Width every strip gets, and in wrapping fader rows their height.
-    readonly property real stripWidth: customWidth > 0 ? customWidth : naturalWidth
-    readonly property real stripHeight: customHeight > 0 ? customHeight : Kirigami.Units.gridUnit * 16
+    // Width every strip gets (the widest one's), and in wrapping fader rows
+    // their height.
+    readonly property real stripWidth: naturalWidth
+    readonly property real stripHeight: Kirigami.Units.gridUnit * 16
     property bool canMoveBack: false
     property bool canMoveForward: false
     // Strips of this section that are hidden right now.
@@ -51,7 +49,6 @@ ColumnLayout {
         spacing: Kirigami.Units.smallSpacing
         Layout.fillWidth: section.wrap
 
-        HoverHandler { id: headerHover }
         TapHandler {
             acceptedButtons: Qt.RightButton
             onTapped: sectionMenu.popup()
@@ -62,8 +59,6 @@ ColumnLayout {
             level: 4
         }
         QQC2.ToolButton {
-            opacity: headerHover.hovered || hovered || sectionMenu.visible ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: Kirigami.Units.shortDuration } }
             icon.name: "overflow-menu"
             display: QQC2.AbstractButton.IconOnly
             text: "Section options"

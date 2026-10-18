@@ -47,6 +47,9 @@ fn headless() {
             ["mic", bus, m] => Command::SetBusMic { bus: bus.to_string(), enabled: *m == "1" || *m == "true" },
             ["add-bus", label @ ..] => Command::AddBus { label: label.join(" ") },
             ["remove-bus", name] => Command::RemoveBus { name: name.to_string() },
+            ["rename-bus", name, label @ ..] => Command::RenameBus { name: name.to_string(), label: label.join(" ") },
+            ["add-app", name @ ..] => Command::AddApp { name: name.join(" ") },
+            ["forget-app", key] => Command::ForgetApp { key: key.to_string() },
             ["default", name] => Command::SetDefaultSink { name: name.to_string() },
             ["default-source", name] => Command::SetDefaultSource { name: name.to_string() },
             ["fx", key, json @ ..] => match serde_json::from_str(&json.join(" ")) {

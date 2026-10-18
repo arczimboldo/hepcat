@@ -1,26 +1,52 @@
 use cxx_qt_build::{CxxQtBuilder, QmlModule};
 
 fn main() {
-    CxxQtBuilder::new_qml_module(QmlModule::new("org.hepcat").qml_files([
+    let kglobalaccel = kglobalaccel_include();
+    let builder = CxxQtBuilder::new_qml_module(QmlModule::new("org.hepcat").qml_files([
         "qml/Main.qml",
         "qml/Strip.qml",
         "qml/Section.qml",
         "qml/Fader.qml",
         "qml/EffectsDialog.qml",
-    ]))
-    .qt_module("Gui")
-    .qt_module("Widgets")
-    .qt_module("Quick")
-    .qt_module("QuickControls2")
-    .qt_module("Network")
-    .qt_module("DBus")
-    .qt_module("Svg")
-    .qrc_resources(["icons/hepcat.svg", "icons/hepcat-symbolic.svg"])
-    .files(["src/bridge.rs"])
-    .cpp_file("cpp/launcher.cpp")
-    .build();
+        "qml/AddTile.qml",
+        "qml/AddAppDialog.qml",
+        "qml/Shortcuts.qml",
+        "qml/ShortcutsDialog.qml",
+    ]));
+    // SAFETY: only adds an include path, which cannot clash with what
+    // cxx-qt-build sets up itself.
+    let builder = unsafe {
+        builder.cc_builder(move |cc| {
+            cc.include(&kglobalaccel);
+        })
+    };
+    builder
+        .qt_module("Gui")
+        .qt_module("Widgets")
+        .qt_module("Quick")
+        .qt_module("QuickControls2")
+        .qt_module("Network")
+        .qt_module("DBus")
+        .qt_module("Svg")
+        .qrc_resources(["icons/hepcat.svg", "icons/hepcat-symbolic.svg"])
+        .files(["src/bridge.rs"])
+        .cpp_file("cpp/launcher.cpp")
+        .cpp_file("cpp/shortcuts.cpp")
+        .build();
+    println!("cargo:rustc-link-lib=KF6GlobalAccel");
 
     build_apm();
+}
+
+/// KF6's GlobalAccel ships CMake files but no pkg-config file, so look for
+/// its headers where distributions (and the KDE Flatpak SDK) put them.
+fn kglobalaccel_include() -> std::path::PathBuf {
+    println!("cargo:rerun-if-env-changed=KF6_INCLUDE_DIR");
+    let roots = std::env::var("KF6_INCLUDE_DIR").into_iter().chain(["/usr/include/KF6".into(), "/usr/local/include/KF6".into()]);
+    roots
+        .map(|root| std::path::Path::new(&root).join("KGlobalAccel"))
+        .find(|dir| dir.join("kglobalaccel.h").exists())
+        .expect("KGlobalAccel headers not found; install KF6 GlobalAccel (kglobalaccel) or set KF6_INCLUDE_DIR")
 }
 
 /// The WebRTC audio processing shim (echo cancellation, noise suppression,

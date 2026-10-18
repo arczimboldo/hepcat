@@ -40,9 +40,13 @@ Instead of a node graph, Hepcat shows mixer strips:
 - **Microphones** (every input source, real or virtual) and **Applications**
   are sources. Each has a fader, mute and one button per bus. Click buttons
   to send the source to one or more buses.
+- **Add App** keeps an app in the mixer while it is silent, so its buses and
+  effects are ready before it plays (many games only play sound while they
+  have focus). Pick an app heard before, or type its name.
 - **Buses** are virtual outputs that Hepcat creates (they appear as normal
   output devices, e.g. "Main (Hepcat)"). Each bus has a fader and a picker
-  for the hardware device it plays to.
+  for the hardware device it plays to. Rename or remove a bus from its ⋯
+  menu.
 - **Outputs** are your real devices.
 - Every strip has a **level meter** next to its fader.
 - The **star** button on an input, bus or output makes it the system
@@ -87,15 +91,31 @@ The **View** menu in the top right changes the layout:
   many strips fit without wasting height.
 - **Fader strips** or **compact tiles**: small horizontal tiles with a
   slider, which fill the window in columns or a grid.
-- Which sections are shown, and **Reset Layout**.
+- **Hidden Elements** and **Reset Layout**.
 
-Drag the right edge of a strip to make that section's strips wider or
-narrower, or the bottom edge in the wrapped layout to make them taller.
-Double-click the edge to reset. The ⋯ button on a strip or section (or a
-right-click) hides it or moves it left or right. A **Hidden** button in the
-toolbar, and an "N hidden" note next to the section title, show that
-something is hidden and bring it back. Hidden apps stay hidden when they
-restart. The layout is saved in `~/.config/hepcat/layout.conf`.
+The ⋯ button on a strip or section (or a right-click) hides it from the
+window, or moves it. Hiding only declutters Hepcat: the app or device keeps
+working as usual. A **Hidden** button in the toolbar, and an "N hidden" note
+next to a section title, show that something is hidden. **Hidden Elements**
+shows or hides whole sections and brings hidden strips back. Hidden apps
+stay hidden when they restart. The layout is saved in
+`~/.config/hepcat/layout.conf`.
+
+**Shortcuts** (in the toolbar) binds keys that work everywhere, also while
+Hepcat sits in the tray, to almost anything on any strip:
+
+- mute, unmute or toggle, or **push to talk** (unmuted only while held) and
+  push to mute
+- volume up or down by a chosen step, or to a set level
+- make an input or output the default
+- effects on or off, or a single effect: noise suppression, voice
+  isolation, echo cancellation, gate, automatic gain or a voice effect
+- send an app or input to a bus, or stop
+- switch which device a bus plays to, and offer a bus as a microphone
+- show or hide the Hepcat window
+
+They use KDE Plasma's shortcut service, so they also show up, and can be
+changed, under System Settings → Keyboard → Shortcuts → Hepcat.
 
 Closing the window keeps Hepcat running in the **system tray**, so rules keep
 being applied (for example when headphones reconnect). Use "Start at Login" in
@@ -144,21 +164,24 @@ restarts or a device comes back, so nothing has to be rewired by hand.
 
 ## Build and run
 
-Needs Rust 1.85+, clang, Qt 6 (base, declarative, svg), Kirigami and
-qqc2-desktop-style for Qt 6 (KDE Frameworks 6), PipeWire, WirePlumber and
+Needs Rust 1.85+, clang, Qt 6 (base, declarative, svg), Kirigami,
+qqc2-desktop-style, KGlobalAccel and KDeclarative for Qt 6 (KDE Frameworks
+6), PipeWire, WirePlumber and
 webrtc-audio-processing 1.x or 2.x (a PipeWire dependency). That rules out
 Ubuntu 24.04 and Debian 12, which lack KDE Frameworks 6; use the Flatpak there.
 
 ```sh
 # Arch
 sudo pacman -S --needed rust clang qt6-declarative qt6-svg kirigami qqc2-desktop-style \
-  pipewire wireplumber webrtc-audio-processing-1
+  kglobalaccel kdeclarative pipewire wireplumber webrtc-audio-processing-1
 # Fedora
 sudo dnf install cargo clang gcc-c++ qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel \
-  kf6-kirigami-devel kf6-qqc2-desktop-style pipewire-devel webrtc-audio-processing-devel
+  kf6-kirigami-devel kf6-qqc2-desktop-style kf6-kglobalaccel-devel kf6-kdeclarative \
+  pipewire-devel webrtc-audio-processing-devel
 # Debian 13, Ubuntu 25.04+
 sudo apt install cargo clang g++ pkg-config qt6-base-dev qt6-declarative-dev qt6-svg-dev \
   qml6-module-org-kde-kirigami qml6-module-org-kde-qqc2desktopstyle \
+  libkf6globalaccel-dev qml6-module-org-kde-kquickcontrols \
   libpipewire-0.3-dev libwebrtc-audio-processing-dev
 ```
 
@@ -189,7 +212,8 @@ HEPCAT_FAKE_STATE=state.json cargo run   # show a saved state, no PipeWire
 
 `--headless` reads one command per line: `toggle <key> <bus>`,
 `output <bus> [device]`, `volume <ids> <0..1.5>`, `mute <ids> 0|1`, `mic <bus> 0|1`,
-`add-bus <label>`, `remove-bus <name>`, `default <node.name>`,
+`add-bus <label>`, `remove-bus <name>`, `rename-bus <name> <label>`,
+`add-app <name>`, `forget-app app:<name>`, `default <node.name>`,
 `default-source <node.name>`, `fx <key> <json>`, where the key is
 `mic:<node.name>`, `app:<name>` or `bus:<name>` (for example
 `fx mic:alsa_input.usb-mic {"enabled":true,"noise":"voice","pitch":-4}`).
@@ -210,7 +234,5 @@ MIT, see [LICENSE](LICENSE).
 
 ## Roadmap
 
-- Rename buses
-- Show saved routes for apps that are not running
 - Effects on hardware outputs
 - Optional filtered graph view for advanced patching

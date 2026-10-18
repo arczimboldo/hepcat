@@ -32,6 +32,34 @@ Kirigami.ApplicationWindow {
         onLevelsJsonChanged: root.levels = JSON.parse(levelsJson)
     }
 
+    // Called by the launcher when a global shortcut is pressed or let go,
+    // and when its keys are changed in System Settings.
+    function onShortcut(id, pressed) {
+        shortcuts.run(id, pressed)
+    }
+    function onShortcutKeysChanged(id, keys) {
+        shortcuts.keysChanged(id, keys)
+    }
+    function toggleWindow() {
+        if (visible && active) {
+            hide()
+        } else {
+            show()
+            raise()
+            requestActivate()
+        }
+    }
+
+    Shortcuts {
+        id: shortcuts
+        mixer: backend
+        state: root.lastState
+        stored: ui.shortcuts
+        onStoredEdited: json => ui.shortcuts = json
+        onToggleWindowRequested: root.toggleWindow()
+        Component.onCompleted: registerAll()
+    }
+
     // Node id -> meter level, refreshed ~25 times a second.
     property var levels: ({})
     function levelOf(ids) {
@@ -54,8 +82,8 @@ Kirigami.ApplicationWindow {
         property string hidden: "{}"
         // JSON: section id -> strip uids in the order the user put them.
         property string order: "{}"
-        // JSON: style -> section id -> { w, h } in grid units.
-        property string sizes: "{}"
+        // JSON: the global shortcuts, see Shortcuts.qml.
+        property string shortcuts: "[]"
     }
 
     readonly property bool wrap: ui.mode === "wrap"
@@ -63,7 +91,6 @@ Kirigami.ApplicationWindow {
     readonly property var hiddenStrips: parse(ui.hidden, {})
     readonly property var hiddenSectionIds: parse(ui.hiddenSections, [])
     readonly property var stripOrder: parse(ui.order, {})
-    readonly property var stripSizes: parse(ui.sizes, {})
 
     readonly property var sectionInfo: ({
         mics: { title: "Microphones", kind: "mic", placeholder: "No input devices", model: micModel },
@@ -138,35 +165,17 @@ Kirigami.ApplicationWindow {
         ui.order = JSON.stringify(o)
         refresh()
     }
-    // Width and height in pixels, 0 for the default.
-    function sizeOf(section) {
-        const s = (stripSizes[ui.style] || {})[section] || {}
-        return { w: (s.w || 0) * Kirigami.Units.gridUnit, h: (s.h || 0) * Kirigami.Units.gridUnit }
-    }
-    function resize(section, w, h) {
-        const all = Object.assign({}, stripSizes)
-        const style = Object.assign({}, all[ui.style] || {})
-        const s = Object.assign({}, style[section] || {})
-        if (w >= 0) s.w = w > 0 ? w / Kirigami.Units.gridUnit : undefined
-        if (h >= 0) s.h = h > 0 ? h / Kirigami.Units.gridUnit : undefined
-        style[section] = s
-        all[ui.style] = style
-        ui.sizes = JSON.stringify(all)
-    }
     function resetLayout() {
         ui.mode = "row"
         ui.style = "faders"
         ui.sectionOrder = "[]"
         ui.order = "{}"
-        ui.sizes = "{}"
         showEverything()
     }
 
-    // What is hidden, for the dialog that brings it back: sections first.
+    // Hidden strips, for the dialog that brings them back.
     readonly property var hiddenList: {
-        const list = hiddenSectionIds.filter(id => sectionInfo[id]).map(id => ({
-            uid: "section:" + id, label: sectionInfo[id].title, detail: "Whole section",
-        }))
+        const list = []
         for (const uid in hiddenStrips) {
             const h = hiddenStrips[uid]
             list.push({
@@ -177,6 +186,8 @@ Kirigami.ApplicationWindow {
         }
         return list
     }
+    // Hidden sections and strips, for the toolbar.
+    readonly property int hiddenTotal: hiddenList.length + hiddenSectionIds.filter(id => sectionInfo[id]).length
     // Uids of every strip that exists right now, hidden or not.
     property var presentUids: []
     // Hidden strips that exist right now, by section.
@@ -299,9 +310,48 @@ Kirigami.ApplicationWindow {
         onAccepted: backend.removeBus(busName)
     }
 
+    Kirigami.PromptDialog {
+        id: renameBusDialog
+        property string busName
+        title: "Rename Bus"
+        standardButtons: Kirigami.Dialog.Ok | Kirigami.Dialog.Cancel
+        onOpened: renameField.forceActiveFocus()
+        onAccepted: backend.renameBus(busName, renameField.text)
+
+        ColumnLayout {
+            QQC2.TextField {
+                id: renameField
+                Layout.fillWidth: true
+                onAccepted: renameBusDialog.accept()
+            }
+            QQC2.Label {
+                text: "Apps and devices see the new name right away. Sound through the bus pauses for a moment while it is renamed."
+                wrapMode: Text.WordWrap
+                opacity: 0.7
+                font: Kirigami.Theme.smallFont
+                Layout.fillWidth: true
+                Layout.preferredWidth: Kirigami.Units.gridUnit * 20
+            }
+        }
+    }
+
+    AddAppDialog {
+        id: addAppDialog
+        mixer: backend
+        knownApps: root.lastState ? (root.lastState.knownApps || []) : []
+    }
+
+    ShortcutsDialog {
+        id: shortcutsDialog
+        shortcuts: shortcuts
+        mixer: backend
+    }
+
+    // Everything that can be hidden, in one place: whole sections, and
+    // strips hidden from their ⋯ menu.
     Kirigami.Dialog {
         id: hiddenDialog
-        title: "Hidden"
+        title: "Hidden Elements"
         preferredWidth: Kirigami.Units.gridUnit * 24
         padding: Kirigami.Units.largeSpacing
         standardButtons: Kirigami.Dialog.Close
@@ -309,19 +359,36 @@ Kirigami.ApplicationWindow {
             Kirigami.Action {
                 text: "Show All"
                 icon.name: "view-visible"
-                enabled: root.hiddenList.length > 0
-                onTriggered: {
-                    root.showEverything()
-                    hiddenDialog.close()
-                }
+                enabled: root.hiddenTotal > 0
+                onTriggered: root.showEverything()
             }
         ]
+
         ColumnLayout {
             spacing: Kirigami.Units.smallSpacing
 
+            Kirigami.Heading {
+                text: "Sections"
+                level: 4
+            }
+            Repeater {
+                model: root.sectionOrder
+                delegate: QQC2.CheckBox {
+                    required property string modelData
+                    text: root.sectionInfo[modelData].title
+                    checked: !root.hiddenSectionIds.includes(modelData)
+                    onToggled: root.setSectionHidden(modelData, !checked)
+                }
+            }
+
+            Kirigami.Heading {
+                text: "Hidden strips"
+                level: 4
+                Layout.topMargin: Kirigami.Units.largeSpacing
+            }
             QQC2.Label {
                 visible: root.hiddenList.length === 0
-                text: "Nothing is hidden. Hide a strip or section from its ⋯ menu or by right-clicking it."
+                text: "None. Hide a microphone, app, bus or output from the ⋯ button on its strip, or by right-clicking it."
                 wrapMode: Text.WordWrap
                 opacity: 0.7
                 Layout.fillWidth: true
@@ -351,9 +418,7 @@ Kirigami.ApplicationWindow {
                     QQC2.Button {
                         text: "Show"
                         icon.name: "view-visible"
-                        onClicked: modelData.uid.startsWith("section:")
-                            ? root.setSectionHidden(modelData.uid.slice(8), false)
-                            : root.showStrip(modelData.uid)
+                        onClicked: root.showStrip(modelData.uid)
                     }
                 }
             }
@@ -366,16 +431,22 @@ Kirigami.ApplicationWindow {
 
         actions: [
             Kirigami.Action {
-                text: root.hiddenList.length + " Hidden"
+                text: root.hiddenTotal + " Hidden"
                 icon.name: "view-hidden"
-                visible: root.hiddenList.length > 0
-                tooltip: "Show strips and sections you hid"
+                visible: root.hiddenTotal > 0
+                tooltip: "Some sections or strips are hidden; show or manage them"
                 onTriggered: hiddenDialog.open()
+            },
+            Kirigami.Action {
+                text: "Shortcuts"
+                icon.name: "configure-shortcuts"
+                tooltip: "Keys that mute, change volume, switch effects and more, from anywhere"
+                onTriggered: shortcutsDialog.open()
             },
             Kirigami.Action {
                 text: "View"
                 icon.name: "view-list-details"
-                tooltip: "Layout, strip size and which sections are shown"
+                tooltip: "Layout, and which sections and strips are shown"
 
                 Kirigami.Action {
                     text: "One Row (scroll sideways)"
@@ -420,51 +491,14 @@ Kirigami.ApplicationWindow {
                 }
                 Kirigami.Action { separator: true }
                 Kirigami.Action {
-                    text: "Microphones"
-                    checkable: true
-                    checked: !root.hiddenSectionIds.includes("mics")
-                    onTriggered: {
-                        root.setSectionHidden("mics", !checked)
-                        checked = Qt.binding(() => !root.hiddenSectionIds.includes("mics"))
-                    }
-                }
-                Kirigami.Action {
-                    text: "Applications"
-                    checkable: true
-                    checked: !root.hiddenSectionIds.includes("apps")
-                    onTriggered: {
-                        root.setSectionHidden("apps", !checked)
-                        checked = Qt.binding(() => !root.hiddenSectionIds.includes("apps"))
-                    }
-                }
-                Kirigami.Action {
-                    text: "Buses"
-                    checkable: true
-                    checked: !root.hiddenSectionIds.includes("buses")
-                    onTriggered: {
-                        root.setSectionHidden("buses", !checked)
-                        checked = Qt.binding(() => !root.hiddenSectionIds.includes("buses"))
-                    }
-                }
-                Kirigami.Action {
-                    text: "Outputs"
-                    checkable: true
-                    checked: !root.hiddenSectionIds.includes("outputs")
-                    onTriggered: {
-                        root.setSectionHidden("outputs", !checked)
-                        checked = Qt.binding(() => !root.hiddenSectionIds.includes("outputs"))
-                    }
-                }
-                Kirigami.Action { separator: true }
-                Kirigami.Action {
-                    text: "Hidden Strips…"
+                    text: "Hidden Elements…"
                     icon.name: "view-hidden"
                     onTriggered: hiddenDialog.open()
                 }
                 Kirigami.Action {
                     text: "Reset Layout"
                     icon.name: "edit-reset"
-                    tooltip: "Show everything again, in the original order, layout and sizes"
+                    tooltip: "Show everything again, in the original order and layout"
                     onTriggered: root.resetLayout()
                 }
             }
@@ -512,7 +546,6 @@ Kirigami.ApplicationWindow {
                         required property string modelData
                         required property int index
                         readonly property var info: root.sectionInfo[modelData]
-                        readonly property var size: root.sizeOf(modelData)
 
                         flow: root.wrap ? GridLayout.TopToBottom : GridLayout.LeftToRight
                         columnSpacing: Kirigami.Units.gridUnit
@@ -534,8 +567,6 @@ Kirigami.ApplicationWindow {
                             hiddenCount: root.hiddenCounts[sectionCell.modelData] || 0
                             wrap: root.wrap
                             compact: root.compact
-                            customWidth: sectionCell.size.w
-                            customHeight: sectionCell.size.h
                             canMoveBack: sectionCell.index > 0
                             canMoveForward: sectionCell.index < root.shownSections.length - 1
                             Layout.fillWidth: root.wrap
@@ -574,11 +605,13 @@ Kirigami.ApplicationWindow {
                                     outputLabel: model.outputLabel ?? ""
                                     online: model.online ?? true
                                     micEnabled: model.mic ?? false
+                                    running: model.running ?? true
+                                    kept: model.kept ?? false
 
                                     compact: root.compact
                                     canMoveBack: index > 0
                                     canMoveForward: index < sectionCell.info.model.count - 1
-                                    heightResizable: root.wrap && !root.compact
+                                    movesVertically: root.compact && !root.wrap
                                     Layout.preferredWidth: Math.max(minimumWidth, section.stripWidth)
                                     Layout.fillHeight: !root.wrap && !root.compact
                                     Layout.preferredHeight: root.wrap && !root.compact ? section.stripHeight : -1
@@ -587,7 +620,12 @@ Kirigami.ApplicationWindow {
                                     onEffectsRequested: effectsDialog.openFor(model.key, kind, model.label, model.fx)
                                     onHideRequested: root.hideStrip(sectionCell.modelData, model.uid, model.label)
                                     onMoveRequested: delta => root.moveStrip(sectionCell.modelData, model.uid, delta)
-                                    onResizeRequested: (w, h) => root.resize(sectionCell.modelData, w, h)
+                                    onForgetRequested: backend.forgetApp(model.key)
+                                    onRenameRequested: {
+                                        renameBusDialog.busName = model.name
+                                        renameField.text = model.label
+                                        renameBusDialog.open()
+                                    }
                                     onRemoveRequested: {
                                         removeBusDialog.busName = model.name
                                         removeBusDialog.busLabel = model.label
@@ -596,57 +634,20 @@ Kirigami.ApplicationWindow {
                                 }
                             }
 
-                            // Sits where the new bus will appear.
-                            QQC2.AbstractButton {
-                                id: addBusTile
-                                visible: sectionCell.modelData === "buses"
-                                text: "Add Bus"
-                                hoverEnabled: true
+                            // Sits where the new strip will appear.
+                            AddTile {
+                                visible: sectionCell.modelData === "buses" || sectionCell.modelData === "apps"
+                                text: sectionCell.modelData === "buses" ? "Add Bus" : "Add App"
+                                tooltip: sectionCell.modelData === "buses"
+                                    ? "Create a virtual output that apps can play into"
+                                    : "Keep an app here while it is silent, e.g. a game that only plays sound in focus"
+                                compact: root.compact
                                 Layout.fillHeight: !root.wrap && !root.compact
                                 Layout.preferredWidth: root.compact ? section.stripWidth : Kirigami.Units.gridUnit * 5
                                 Layout.preferredHeight: root.compact ? Math.max(implicitHeight, section.tileHeight)
                                                       : root.wrap ? section.stripHeight : -1
                                 Layout.alignment: Qt.AlignTop
-                                QQC2.ToolTip.text: "Create a virtual output that apps can play into"
-                                QQC2.ToolTip.visible: hovered
-                                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
-                                onClicked: addBusDialog.open()
-
-                                contentItem: Item {
-                                    implicitWidth: addBusContent.implicitWidth
-                                    implicitHeight: addBusContent.implicitHeight
-
-                                    // Icon over the label in a strip, beside it in a tile.
-                                    GridLayout {
-                                        id: addBusContent
-                                        anchors.centerIn: parent
-                                        columns: root.compact ? 2 : 1
-                                        columnSpacing: Kirigami.Units.smallSpacing
-                                        rowSpacing: Kirigami.Units.smallSpacing
-
-                                        Kirigami.Icon {
-                                            source: "list-add"
-                                            color: addBusTile.hovered ? Kirigami.Theme.highlightColor : Kirigami.Theme.textColor
-                                            Layout.alignment: Qt.AlignCenter
-                                            Layout.preferredWidth: Kirigami.Units.iconSizes.medium
-                                            Layout.preferredHeight: Kirigami.Units.iconSizes.medium
-                                        }
-                                        QQC2.Label {
-                                            text: addBusTile.text
-                                            Layout.alignment: Qt.AlignCenter
-                                        }
-                                    }
-                                }
-
-                                background: Rectangle {
-                                    radius: Kirigami.Units.cornerRadius
-                                    color: addBusTile.pressed ? Qt.alpha(Kirigami.Theme.highlightColor, 0.2)
-                                         : addBusTile.hovered ? Qt.alpha(Kirigami.Theme.highlightColor, 0.1) : "transparent"
-                                    border.width: 1
-                                    border.color: addBusTile.hovered || addBusTile.visualFocus
-                                        ? Kirigami.Theme.highlightColor
-                                        : Kirigami.ColorUtils.linearInterpolation(Kirigami.Theme.backgroundColor, Kirigami.Theme.textColor, 0.2)
-                                }
+                                onClicked: sectionCell.modelData === "buses" ? addBusDialog.open() : addAppDialog.open()
                             }
                         }
                     }

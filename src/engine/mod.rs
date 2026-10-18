@@ -37,6 +37,12 @@ pub enum Command {
     SetBusMic { bus: String, enabled: bool },
     AddBus { label: String },
     RemoveBus { name: String },
+    RenameBus { name: String, label: String },
+    /// Keep an app in the mixer while it plays nothing; `name` is its
+    /// application name (the part after `app:` in its key).
+    AddApp { name: String },
+    /// Stop keeping an app that was added by hand (`app:…` key).
+    ForgetApp { key: String },
     SetDefaultSink { name: String },
     SetDefaultSource { name: String },
     /// Replace the effects of the strip with this key (`mic:…`, `app:…`, `bus:…`).
@@ -532,6 +538,7 @@ impl State {
         self.sync_meters();
         self.apply_plan();
         self.remember_output_labels();
+        self.remember_apps();
         self.emit();
     }
 
@@ -777,6 +784,33 @@ impl State {
         }
     }
 
+    /// Note every app that plays, so it can be added back by hand later.
+    fn remember_apps(&mut self) {
+        let seen: Vec<(String, String, String)> = self
+            .graph
+            .nodes_of(Kind::App)
+            .filter_map(|n| {
+                let icon = n.icon.clone().or(n.binary.clone()).unwrap_or_default();
+                Some((n.route_key()?, n.label(), icon))
+            })
+            .collect();
+        let Some(config) = &mut self.config else { return };
+        let mut changed = false;
+        for (key, label, icon) in seen {
+            let app = config.apps.entry(key).or_default();
+            if app.label != label || (!icon.is_empty() && app.icon != icon) {
+                app.label = label;
+                if !icon.is_empty() {
+                    app.icon = icon;
+                }
+                changed = true;
+            }
+        }
+        if changed {
+            config.save();
+        }
+    }
+
     fn apply_plan(&mut self) {
         let Some(config) = &self.config else { return };
         let plan = self.graph.plan(config);
@@ -906,6 +940,26 @@ impl State {
                 self.save();
             }
             Command::RemoveBus { name } => self.remove_bus(&name),
+            Command::RenameBus { name, label } => self.rename_bus(&name, &label),
+            Command::AddApp { name } => {
+                let name = name.trim();
+                let name = name.strip_prefix("app:").unwrap_or(name).trim();
+                if name.is_empty() {
+                    return;
+                }
+                let app = self.config().apps.entry(format!("app:{name}")).or_default();
+                if app.label.is_empty() {
+                    app.label = name.to_string();
+                }
+                app.kept = true;
+                self.save();
+            }
+            Command::ForgetApp { key } => {
+                if let Some(app) = self.config().apps.get_mut(&key) {
+                    app.kept = false;
+                }
+                self.save();
+            }
             Command::SetMeters(enabled) => {
                 self.meters_enabled = enabled && std::env::var_os("HEPCAT_NO_METERS").is_none();
                 self.dirty = true;
@@ -963,6 +1017,26 @@ impl State {
             }
         } else {
             self.config().routes.insert(key.to_string(), route);
+        }
+        self.save();
+    }
+
+    /// Buses are named in their node description, which cannot change, so
+    /// the bus (and its microphone) are made again under the new name. Apps
+    /// and links come back on their own, after a short gap.
+    fn rename_bus(&mut self, name: &str, label: &str) {
+        let label = label.trim();
+        let Some(bus) = self.config().buses.iter_mut().find(|b| b.name == name) else { return };
+        if label.is_empty() || bus.label == label {
+            return;
+        }
+        bus.label = label.to_string();
+        let names = [bus.node_name(), bus.mic_node_name()];
+        for node_name in names {
+            self.pending_buses.remove(&node_name);
+            if let Some(node) = self.graph.node_by_name(&node_name) {
+                let _ = self.registry.destroy_global(node.id);
+            }
         }
         self.save();
     }
@@ -1049,9 +1123,45 @@ impl State {
                     "meterIds": meter,
                     "fx": fx,
                     "fxActive": fx_output.is_some(),
+                    "running": true,
+                    "kept": cfg.apps.get(key).is_some_and(|a| a.kept),
                 })
             })
+            .chain(
+                // Apps kept in the mixer that play nothing right now.
+                cfg.apps
+                    .iter()
+                    .filter(|(key, app)| app.kept && !app_groups.iter().any(|(k, _)| k == *key))
+                    .map(|(key, app)| {
+                        let (fx, fx_output, meter) = fx_info(key, &[]);
+                        json!({
+                            "key": key,
+                            "label": app.label,
+                            "detail": "Not playing",
+                            "icon": app.icon,
+                            "ids": [],
+                            "volume": 1.0,
+                            "mute": false,
+                            "buses": cfg.routes.get(key).cloned().unwrap_or_default(),
+                            "pinned": cfg.routes.contains_key(key),
+                            "direct": "",
+                            "meterIds": meter,
+                            "fx": fx,
+                            "fxActive": fx_output.is_some(),
+                            "running": false,
+                            "kept": true,
+                        })
+                    }),
+            )
             .collect();
+        // Apps seen before that are neither playing nor kept, to add by hand.
+        let mut known_apps: Vec<_> = cfg
+            .apps
+            .iter()
+            .filter(|(key, app)| !app.kept && !app_groups.iter().any(|(k, _)| k == *key))
+            .map(|(key, app)| json!({ "key": key, "label": app.label, "icon": app.icon }))
+            .collect();
+        known_apps.sort_by_key(|a| a["label"].as_str().unwrap_or_default().to_lowercase());
 
         let mics: Vec<_> = g
             .nodes_of(Kind::Mic)
@@ -1128,7 +1238,7 @@ impl State {
             })
             .collect();
 
-        json!({ "apps": apps, "mics": mics, "buses": buses, "outputs": outputs })
+        json!({ "apps": apps, "mics": mics, "buses": buses, "outputs": outputs, "knownApps": known_apps })
     }
 }
 

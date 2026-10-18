@@ -20,6 +20,8 @@ finish-args:
   - --filesystem=xdg-run/pipewire-0
   # System tray icon.
   - --talk-name=org.kde.StatusNotifierWatcher
+  # Global shortcuts.
+  - --talk-name=org.kde.kglobalaccel
   # Follow the Plasma colour scheme and fonts.
   - --filesystem=xdg-config/kdeglobals:ro
 build-options:

@@ -616,6 +616,7 @@ mod tests {
             ],
             routes: Default::default(),
             fx: Default::default(),
+            apps: Default::default(),
         }
     }
 

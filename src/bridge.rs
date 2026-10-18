@@ -7,6 +7,23 @@ pub mod qobject {
         include!("cxx-qt-lib/qstring.h");
         type QString = cxx_qt_lib::QString;
 
+        include!("cxx-qt-lib/qvariant.h");
+        type QVariant = cxx_qt_lib::QVariant;
+
+        include!("hepcat/cpp/shortcuts.h");
+        #[cxx_name = "globalShortcutsAvailable"]
+        fn global_shortcuts_available() -> bool;
+        #[cxx_name = "setGlobalShortcut"]
+        fn set_global_shortcut(id: &QString, label: &QString, keys: &QString) -> bool;
+        #[cxx_name = "removeGlobalShortcut"]
+        fn remove_global_shortcut(id: &QString);
+        #[cxx_name = "keySequenceToText"]
+        fn key_sequence_to_text(sequence: &QVariant) -> QString;
+        #[cxx_name = "keySequenceFromText"]
+        fn key_sequence_from_text(keys: &QString) -> QVariant;
+        #[cxx_name = "keySequenceNativeText"]
+        fn key_sequence_native_text(keys: &QString) -> QString;
+
         include!("hepcat/cpp/launcher.h");
         /// Create the QApplication, tray icon and QML engine and run the event loop.
         #[cxx_name = "runApp"]
@@ -49,6 +66,44 @@ pub mod qobject {
         fn remove_bus(self: &Mixer, name: &QString);
 
         #[qinvokable]
+        #[cxx_name = "renameBus"]
+        fn rename_bus(self: &Mixer, name: &QString, label: &QString);
+
+        /// Keep an app in the mixer while it plays nothing.
+        #[qinvokable]
+        #[cxx_name = "addApp"]
+        fn add_app(self: &Mixer, name: &QString);
+
+        #[qinvokable]
+        #[cxx_name = "forgetApp"]
+        fn forget_app(self: &Mixer, key: &QString);
+
+        // Global shortcuts; see cpp/shortcuts.h.
+        #[qinvokable]
+        #[cxx_name = "shortcutsAvailable"]
+        fn shortcuts_available(self: &Mixer) -> bool;
+
+        #[qinvokable]
+        #[cxx_name = "setShortcut"]
+        fn set_shortcut(self: &Mixer, id: &QString, label: &QString, keys: &QString) -> bool;
+
+        #[qinvokable]
+        #[cxx_name = "removeShortcut"]
+        fn remove_shortcut(self: &Mixer, id: &QString);
+
+        #[qinvokable]
+        #[cxx_name = "keysFromSequence"]
+        fn keys_from_sequence(self: &Mixer, sequence: &QVariant) -> QString;
+
+        #[qinvokable]
+        #[cxx_name = "sequenceFromKeys"]
+        fn sequence_from_keys(self: &Mixer, keys: &QString) -> QVariant;
+
+        #[qinvokable]
+        #[cxx_name = "keysText"]
+        fn keys_text(self: &Mixer, keys: &QString) -> QString;
+
+        #[qinvokable]
         #[cxx_name = "setMetersEnabled"]
         fn set_meters_enabled(self: &Mixer, enabled: bool);
 
@@ -74,7 +129,7 @@ pub mod qobject {
 use crate::engine::{self, Command};
 use core::pin::Pin;
 use cxx_qt::{CxxQtType, Threading};
-use cxx_qt_lib::QString;
+use cxx_qt_lib::{QString, QVariant};
 
 pub use qobject::run_app;
 
@@ -173,5 +228,43 @@ impl qobject::Mixer {
             Ok(fx) => self.send(Command::SetFx { key: key.to_string(), fx }),
             Err(e) => eprintln!("hepcat: ignoring bad effects settings: {e}"),
         }
+    }
+}
+
+impl qobject::Mixer {
+    fn rename_bus(&self, name: &QString, label: &QString) {
+        self.send(Command::RenameBus { name: name.to_string(), label: label.to_string() });
+    }
+
+    fn add_app(&self, name: &QString) {
+        self.send(Command::AddApp { name: name.to_string() });
+    }
+
+    fn forget_app(&self, key: &QString) {
+        self.send(Command::ForgetApp { key: key.to_string() });
+    }
+
+    fn shortcuts_available(&self) -> bool {
+        qobject::global_shortcuts_available()
+    }
+
+    fn set_shortcut(&self, id: &QString, label: &QString, keys: &QString) -> bool {
+        qobject::set_global_shortcut(id, label, keys)
+    }
+
+    fn remove_shortcut(&self, id: &QString) {
+        qobject::remove_global_shortcut(id);
+    }
+
+    fn keys_from_sequence(&self, sequence: &QVariant) -> QString {
+        qobject::key_sequence_to_text(sequence)
+    }
+
+    fn sequence_from_keys(&self, keys: &QString) -> QVariant {
+        qobject::key_sequence_from_text(keys)
+    }
+
+    fn keys_text(&self, keys: &QString) -> QString {
+        qobject::key_sequence_native_text(keys)
     }
 }
