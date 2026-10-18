@@ -1,4 +1,5 @@
-// One mixer channel: an app, microphone, bus or hardware output.
+// One mixer channel: an app, microphone, bus or hardware output. Drawn as a
+// tall fader strip, or as a small horizontal tile when `compact`.
 
 import QtQuick
 import QtQuick.Controls as QQC2
@@ -45,8 +46,9 @@ QQC2.Control {
         const f = fxSettings
         const db = v => (v > 0 ? "+" : "") + Math.round(v) + " dB"
         const parts = []
-        if (f.noise === "standard") parts.push("Noise suppression")
-        if (f.noise === "voice") parts.push("Voice isolation")
+        const strength = ["", " (light)", " (medium)", "", " (maximum)"][f.noise_strength ?? 3] ?? ""
+        if (f.noise === "standard") parts.push("Noise suppression" + strength)
+        if (f.noise === "voice") parts.push("Voice isolation" + strength)
         if (f.echo) parts.push("Echo cancellation")
         if (f.gate) parts.push("Noise gate (" + Math.round(f.gate_db) + " dB)")
         if (f.gain_db) parts.push("Gain " + db(f.gain_db))
@@ -65,15 +67,35 @@ QQC2.Control {
     property var busList
     property var outputChoices: []
 
+    // A small horizontal tile instead of a tall fader strip.
+    property bool compact: false
+    property bool canMoveBack: false
+    property bool canMoveForward: false
+    // Show the grip on the bottom edge (for strips with a set height).
+    property bool heightResizable: false
+
     signal removeRequested()
     signal effectsRequested()
+    signal hideRequested()
+    // -1 to move left, +1 to move right.
+    signal moveRequested(int delta)
+    // New size in pixels: 0 resets that dimension, -1 leaves it alone.
+    signal resizeRequested(real width, real height)
 
     readonly property bool isSource: kind === "app" || kind === "mic"
+    // The narrowest and shortest the strip gets with everything still usable.
+    readonly property real minimumWidth: compact
+        ? Kirigami.Units.gridUnit * 10
+        : buttonRow.implicitWidth + leftPadding + rightPadding
+    readonly property real minimumHeight: Kirigami.Units.gridUnit * 10
 
     HoverHandler { id: stripHover }
+    TapHandler {
+        acceptedButtons: Qt.RightButton
+        onTapped: stripMenu.popup()
+    }
 
-    // Wide enough for the button row (buses have four buttons).
-    implicitWidth: Math.max(Kirigami.Units.gridUnit * 7, buttonRow.implicitWidth + leftPadding + rightPadding)
+    implicitWidth: compact ? Kirigami.Units.gridUnit * 15 : Math.max(Kirigami.Units.gridUnit * 7, minimumWidth)
     padding: Kirigami.Units.smallSpacing * 2
 
     Kirigami.Theme.colorSet: Kirigami.Theme.View
@@ -86,6 +108,87 @@ QQC2.Control {
         border.color: strip.isDefault
             ? Kirigami.Theme.highlightColor
             : Kirigami.ColorUtils.linearInterpolation(Kirigami.Theme.backgroundColor, Kirigami.Theme.textColor, 0.15)
+    }
+
+    QQC2.Menu {
+        id: stripMenu
+        QQC2.MenuItem {
+            text: "Hide"
+            icon.name: "view-hidden"
+            onTriggered: strip.hideRequested()
+        }
+        QQC2.MenuItem {
+            text: "Move Left"
+            icon.name: "go-previous"
+            enabled: strip.canMoveBack
+            onTriggered: strip.moveRequested(-1)
+        }
+        QQC2.MenuItem {
+            text: "Move Right"
+            icon.name: "go-next"
+            enabled: strip.canMoveForward
+            onTriggered: strip.moveRequested(1)
+        }
+        QQC2.MenuSeparator {
+            visible: strip.kind === "bus"
+            height: visible ? implicitHeight : 0
+        }
+        QQC2.MenuItem {
+            visible: strip.kind === "bus"
+            height: visible ? implicitHeight : 0
+            text: "Remove Bus…"
+            icon.name: "edit-delete"
+            onTriggered: strip.removeRequested()
+        }
+    }
+
+    // A drag handle on the right or bottom edge; double-click resets.
+    component Grip: MouseArea {
+        id: grip
+        property bool horizontal: true
+        property real startPos
+        property real startSize
+        z: 1
+        hoverEnabled: true
+        cursorShape: horizontal ? Qt.SizeHorCursor : Qt.SizeVerCursor
+        onPressed: mouse => {
+            const p = mapToGlobal(mouse.x, mouse.y)
+            startPos = horizontal ? p.x : p.y
+            startSize = horizontal ? strip.width : strip.height
+        }
+        onPositionChanged: mouse => {
+            if (!pressed)
+                return
+            const p = mapToGlobal(mouse.x, mouse.y)
+            const size = startSize + (horizontal ? p.x : p.y) - startPos
+            if (horizontal)
+                strip.resizeRequested(Math.max(strip.minimumWidth, size), -1)
+            else
+                strip.resizeRequested(-1, Math.max(strip.minimumHeight, size))
+        }
+        onDoubleClicked: horizontal ? strip.resizeRequested(0, -1) : strip.resizeRequested(-1, 0)
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: grip.horizontal ? 2 : parent.width - Kirigami.Units.cornerRadius * 2
+            height: grip.horizontal ? parent.height - Kirigami.Units.cornerRadius * 2 : 2
+            color: Kirigami.Theme.highlightColor
+            visible: grip.containsMouse || grip.pressed
+        }
+        QQC2.ToolTip.text: "Drag to resize all " + ({ app: "apps", mic: "inputs", bus: "buses", output: "outputs" })[strip.kind]
+            + "; double-click to reset"
+        QQC2.ToolTip.visible: containsMouse && !pressed
+        QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay * 2
+    }
+    Grip {
+        anchors { top: parent.top; bottom: parent.bottom; right: parent.right; rightMargin: -width / 2 }
+        width: Kirigami.Units.smallSpacing * 2
+    }
+    Grip {
+        visible: strip.heightResizable
+        horizontal: false
+        anchors { left: parent.left; right: parent.right; bottom: parent.bottom; bottomMargin: -height / 2 }
+        height: Kirigami.Units.smallSpacing * 2
     }
 
     contentItem: ColumnLayout {
@@ -143,214 +246,214 @@ QQC2.Control {
                 QQC2.ToolTip.visible: hovered
                 QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
             }
+            // Only takes room while the pointer is over the strip.
             QQC2.ToolButton {
-                visible: strip.kind === "bus"
-                opacity: stripHover.hovered || hovered ? 1 : 0
-                Behavior on opacity { NumberAnimation { duration: Kirigami.Units.shortDuration } }
-                icon.name: "edit-delete"
+                visible: stripHover.hovered || stripMenu.visible
+                icon.name: "overflow-menu"
                 display: QQC2.AbstractButton.IconOnly
-                text: "Remove bus"
-                QQC2.ToolTip.text: text
+                text: "More"
+                padding: 0
+                Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium + Kirigami.Units.smallSpacing * 2
+                Layout.preferredHeight: Layout.preferredWidth
+                QQC2.ToolTip.text: (strip.kind === "bus" ? "Hide, move or remove" : "Hide or move") + " (also on right-click)"
                 QQC2.ToolTip.visible: hovered
                 QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
-                onClicked: strip.removeRequested()
+                onClicked: stripMenu.visible ? stripMenu.close() : stripMenu.popup(this, 0, height)
             }
         }
 
-        // Always laid out (even when empty) so faders line up across strips.
+        // In a fader strip this is laid out even when empty, so faders line up.
         QQC2.Label {
             text: strip.kind === "bus" && !strip.online ? "Starting…"
                 : strip.detail !== strip.label ? strip.detail : ""
+            visible: !strip.compact || text.length > 0
             elide: Text.ElideRight
             opacity: 0.7
             font: Kirigami.Theme.smallFont
             Layout.fillWidth: true
         }
 
-        RowLayout {
-            Layout.fillHeight: true
-            Layout.alignment: Qt.AlignHCenter
-            Layout.minimumHeight: Kirigami.Units.gridUnit * 6
-            spacing: Kirigami.Units.smallSpacing
-
-            QQC2.Slider {
-                id: slider
-                orientation: Qt.Vertical
-                from: 0
-                to: 1
-                stepSize: 0.01
-                Layout.fillHeight: true
-                opacity: strip.mute ? 0.5 : 1
-                enabled: strip.online
-                onMoved: strip.mixer.setVolume(strip.ids, value)
-
-                // Ignore echoes of our own changes while the handle is held.
-                Binding on value {
-                    value: strip.volume
-                    when: !slider.pressed
-                    restoreMode: Binding.RestoreNone
-                }
-            }
-
-            // Peak meter on a -60..0 dB scale: green, yellow from -12 dB, red from -3 dB.
-            Rectangle {
-                id: meter
-                Layout.fillHeight: true
-                Layout.topMargin: slider.topPadding
-                Layout.bottomMargin: slider.bottomPadding
-                implicitWidth: Math.round(Kirigami.Units.smallSpacing * 1.5)
-                radius: width / 2
-                color: Kirigami.ColorUtils.linearInterpolation(Kirigami.Theme.backgroundColor, Kirigami.Theme.textColor, 0.1)
-                clip: true
-
-                Rectangle {
-                    anchors.bottom: parent.bottom
-                    width: parent.width
-                    height: parent.height * strip.level
-                    radius: parent.radius
-                    opacity: strip.mute ? 0.4 : 1
-                    color: strip.level > 0.95 ? Kirigami.Theme.negativeTextColor
-                         : strip.level > 0.8 ? Kirigami.Theme.neutralTextColor
-                         : Kirigami.Theme.positiveTextColor
-                }
-            }
-        }
-
-        QQC2.Label {
-            text: Math.round(slider.value * 100) + "%"
-            font.features: { "tnum": 1 }
-            Layout.alignment: Qt.AlignHCenter
-        }
-
-        RowLayout {
-            id: buttonRow
-            Layout.alignment: Qt.AlignHCenter
-            spacing: 0
-            enabled: strip.online
-
-            QQC2.ToolButton {
-                checkable: true
-                checked: strip.mute
-                icon.name: strip.kind === "mic"
-                    ? (strip.mute ? "microphone-sensitivity-muted" : "audio-input-microphone")
-                    : (strip.mute ? "audio-volume-muted" : "audio-volume-high")
-                text: strip.mute ? "Unmute" : "Mute"
-                display: QQC2.AbstractButton.IconOnly
-                QQC2.ToolTip.text: text
-                QQC2.ToolTip.visible: hovered
-                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
-                onToggled: strip.mixer.setMute(strip.ids, checked)
-            }
-            QQC2.ToolButton {
-                visible: strip.kind !== "app"
-                icon.name: strip.isDefault ? "starred-symbolic" : "non-starred-symbolic"
-                text: strip.kind === "mic"
-                    ? (strip.isDefault ? "Default microphone" : "Make default microphone")
-                    : (strip.isDefault ? "Default output" : "Make default output")
-                display: QQC2.AbstractButton.IconOnly
-                QQC2.ToolTip.text: strip.kind === "mic"
-                    ? (strip.isDefault ? "Apps record from here unless told otherwise"
-                                       : "Make this the default microphone" + (strip.fxActive ? ", with its effects" : ""))
-                    : (strip.isDefault ? "New apps play here"
-                                       : "Make this the default output, so new apps play here")
-                QQC2.ToolTip.visible: hovered
-                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
-                onClicked: {
-                    if (strip.kind === "mic")
-                        strip.mixer.setDefaultSource(strip.fxActive && strip.fxDevice ? strip.fxDevice : strip.micName)
-                    else
-                        strip.mixer.setDefaultSink(strip.kind === "bus" ? strip.nodeName : strip.key)
-                }
-            }
-            QQC2.ToolButton {
-                visible: strip.kind !== "output"
-                checked: strip.fxEnabled
-                icon.name: "configure"
-                text: "Effects"
-                display: QQC2.AbstractButton.IconOnly
-                QQC2.ToolTip.text: (strip.fxEnabled ? "Effects are on" : "Effects") + ": "
-                    + (strip.kind === "mic" ? "noise suppression, echo cancellation, gain and voice changer"
-                                            : "noise suppression, gain, EQ and voice changer")
-                QQC2.ToolTip.visible: hovered
-                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
-                onClicked: strip.effectsRequested()
-            }
-            QQC2.ToolButton {
-                visible: strip.kind === "bus"
-                checkable: true
-                checked: strip.micEnabled
-                icon.name: "audio-input-microphone"
-                text: strip.micEnabled ? "Stop offering as microphone" : "Use as microphone"
-                display: QQC2.AbstractButton.IconOnly
-                QQC2.ToolTip.text: strip.micEnabled
-                    ? "Apps can record this bus as “" + strip.label + " (Hepcat mic)”"
-                    : "Let apps like Discord or OBS record this bus as a microphone"
-                QQC2.ToolTip.visible: hovered
-                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
-                onToggled: strip.mixer.setBusMic(strip.busName, checked)
-            }
-        }
-
-        // Sources: which buses this source feeds.
-        Flow {
-            visible: strip.isSource
+        // Strip: fader, percentage, buttons, then routing, top to bottom.
+        // Tile: buttons, fader and percentage in one row, routing under them.
+        GridLayout {
+            columns: strip.compact ? 3 : 1
+            columnSpacing: Kirigami.Units.smallSpacing
+            rowSpacing: Kirigami.Units.smallSpacing
             Layout.fillWidth: true
-            spacing: Kirigami.Units.smallSpacing
+            Layout.fillHeight: !strip.compact
 
-            Repeater {
-                model: strip.isSource ? strip.busList : null
-                delegate: QQC2.Button {
-                    id: routeButton
-                    required property string name
-                    required property string label
-                    readonly property bool active: strip.buses.indexOf("|" + name + "|") >= 0
-                    text: label
+            Fader {
+                id: fader
+                Layout.row: 0
+                Layout.column: strip.compact ? 1 : 0
+                vertical: !strip.compact
+                volume: strip.volume
+                level: strip.level
+                mute: strip.mute
+                enabled: strip.online
+                Layout.fillHeight: !strip.compact
+                Layout.fillWidth: strip.compact
+                Layout.minimumHeight: strip.compact ? 0 : Kirigami.Units.gridUnit * 4
+                Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
+                onMoved: value => strip.mixer.setVolume(strip.ids, value)
+            }
+            QQC2.Label {
+                Layout.row: strip.compact ? 0 : 1
+                Layout.column: strip.compact ? 2 : 0
+                text: Math.round(fader.value * 100) + "%"
+                font.features: { "tnum": 1 }
+                horizontalAlignment: Text.AlignRight
+                Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
+                // Room for "100%", so a tile's slider does not jump while dragging.
+                Layout.minimumWidth: strip.compact ? digits.advanceWidth("100%") : 0
+                FontMetrics { id: digits }
+            }
+
+            RowLayout {
+                id: buttonRow
+                Layout.row: strip.compact ? 0 : 2
+                Layout.column: 0
+                Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
+                spacing: 0
+                enabled: strip.online
+
+                QQC2.ToolButton {
                     checkable: true
-                    checked: active
-                    highlighted: active
-                    icon.name: active ? "checkmark" : ""
-                    width: (parent.width - Kirigami.Units.smallSpacing) / 2
-                    QQC2.ToolTip.text: (checked ? "Stop sending to " : "Send to ") + label
+                    checked: strip.mute
+                    icon.name: strip.kind === "mic"
+                        ? (strip.mute ? "microphone-sensitivity-muted" : "audio-input-microphone")
+                        : (strip.mute ? "audio-volume-muted" : "audio-volume-high")
+                    text: strip.mute ? "Unmute" : "Mute"
+                    display: QQC2.AbstractButton.IconOnly
+                    QQC2.ToolTip.text: text
+                    QQC2.ToolTip.visible: hovered
+                    QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                    onToggled: strip.mixer.setMute(strip.ids, checked)
+                }
+                QQC2.ToolButton {
+                    visible: strip.kind !== "app"
+                    icon.name: strip.isDefault ? "starred-symbolic" : "non-starred-symbolic"
+                    text: strip.kind === "mic"
+                        ? (strip.isDefault ? "Default microphone" : "Make default microphone")
+                        : (strip.isDefault ? "Default output" : "Make default output")
+                    display: QQC2.AbstractButton.IconOnly
+                    QQC2.ToolTip.text: strip.kind === "mic"
+                        ? (strip.isDefault ? "Apps record from here unless told otherwise"
+                                           : "Make this the default microphone" + (strip.fxActive ? ", with its effects" : ""))
+                        : (strip.isDefault ? "New apps play here"
+                                           : "Make this the default output, so new apps play here")
                     QQC2.ToolTip.visible: hovered
                     QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                     onClicked: {
-                        strip.mixer.toggleRoute(strip.key, name)
-                        // Show the real state once the graph confirms it.
-                        checked = Qt.binding(() => routeButton.active)
+                        if (strip.kind === "mic")
+                            strip.mixer.setDefaultSource(strip.fxActive && strip.fxDevice ? strip.fxDevice : strip.micName)
+                        else
+                            strip.mixer.setDefaultSink(strip.kind === "bus" ? strip.nodeName : strip.key)
+                    }
+                }
+                QQC2.ToolButton {
+                    visible: strip.kind !== "output"
+                    checked: strip.fxEnabled
+                    icon.name: "configure"
+                    text: "Effects"
+                    display: QQC2.AbstractButton.IconOnly
+                    QQC2.ToolTip.text: (strip.fxEnabled ? "Effects are on" : "Effects") + ": "
+                        + (strip.kind === "mic" ? "noise suppression, echo cancellation, gain and voice changer"
+                                                : "noise suppression, gain, EQ and voice changer")
+                    QQC2.ToolTip.visible: hovered
+                    QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                    onClicked: strip.effectsRequested()
+                }
+                QQC2.ToolButton {
+                    visible: strip.kind === "bus"
+                    checkable: true
+                    checked: strip.micEnabled
+                    icon.name: "audio-input-microphone"
+                    text: strip.micEnabled ? "Stop offering as microphone" : "Use as microphone"
+                    display: QQC2.AbstractButton.IconOnly
+                    QQC2.ToolTip.text: strip.micEnabled
+                        ? "Apps can record this bus as “" + strip.label + " (Hepcat mic)”"
+                        : "Let apps like Discord or OBS record this bus as a microphone"
+                    QQC2.ToolTip.visible: hovered
+                    QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                    onToggled: strip.mixer.setBusMic(strip.busName, checked)
+                }
+            }
+
+            // Sources: which buses this source feeds.
+            Flow {
+                id: routes
+                Layout.row: 3
+                Layout.column: 0
+                Layout.columnSpan: strip.compact ? 3 : 1
+                visible: strip.isSource
+                Layout.fillWidth: true
+                spacing: Kirigami.Units.smallSpacing
+
+                Repeater {
+                    model: strip.isSource ? strip.busList : null
+                    delegate: QQC2.Button {
+                        id: routeButton
+                        required property string name
+                        required property string label
+                        readonly property bool active: strip.buses.indexOf("|" + name + "|") >= 0
+                        text: label
+                        checkable: true
+                        checked: active
+                        highlighted: active
+                        icon.name: active ? "checkmark" : ""
+                        // Two per row in a strip; as wide as needed in a tile.
+                        width: strip.compact ? Math.min(implicitWidth, routes.width)
+                                             : (routes.width - Kirigami.Units.smallSpacing) / 2
+                        QQC2.ToolTip.text: (checked ? "Stop sending to " : "Send to ") + label
+                        QQC2.ToolTip.visible: hovered
+                        QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                        onClicked: {
+                            strip.mixer.toggleRoute(strip.key, name)
+                            // Show the real state once the graph confirms it.
+                            checked = Qt.binding(() => routeButton.active)
+                        }
                     }
                 }
             }
-        }
 
-        QQC2.Label {
-            visible: strip.kind === "app" && strip.direct.length > 0
-            text: "→ " + strip.direct
-            elide: Text.ElideRight
-            font: Kirigami.Theme.smallFont
-            opacity: 0.7
-            Layout.fillWidth: true
-        }
-
-        // Buses: which hardware output they play to.
-        QQC2.ComboBox {
-            id: outputBox
-            visible: strip.kind === "bus"
-            Layout.fillWidth: true
-            // Long device names are elided rather than widening the strip.
-            Layout.preferredWidth: 0
-            textRole: "label"
-            valueRole: "name"
-            model: {
-                const choices = [{ name: "", label: "No output" }].concat(strip.outputChoices)
-                if (strip.output && !choices.some(c => c.name === strip.output))
-                    choices.push({ name: strip.output, label: strip.outputLabel + " (disconnected)" })
-                return choices
+            // Buses: which hardware output they play to.
+            QQC2.ComboBox {
+                id: outputBox
+                visible: strip.kind === "bus"
+                Layout.row: 4
+                Layout.column: 0
+                Layout.columnSpan: strip.compact ? 3 : 1
+                Layout.fillWidth: true
+                // Long device names are elided rather than widening the strip.
+                Layout.preferredWidth: 0
+                Layout.alignment: Qt.AlignVCenter
+                textRole: "label"
+                valueRole: "name"
+                model: {
+                    const choices = [{ name: "", label: "No output" }].concat(strip.outputChoices)
+                    if (strip.output && !choices.some(c => c.name === strip.output))
+                        choices.push({ name: strip.output, label: strip.outputLabel + " (disconnected)" })
+                    return choices
+                }
+                currentIndex: model.findIndex(c => c.name === strip.output)
+                onActivated: strip.mixer.setBusOutput(strip.busName, currentValue)
+                QQC2.ToolTip.text: "Plays to: " + displayText
+                QQC2.ToolTip.visible: hovered
+                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
             }
-            currentIndex: model.findIndex(c => c.name === strip.output)
-            onActivated: strip.mixer.setBusOutput(strip.busName, currentValue)
-            QQC2.ToolTip.text: "Plays to: " + displayText
-            QQC2.ToolTip.visible: hovered
-            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+
+            QQC2.Label {
+                visible: strip.kind === "app" && strip.direct.length > 0
+                Layout.row: 5
+                Layout.column: 0
+                Layout.columnSpan: strip.compact ? 3 : 1
+                text: "→ " + strip.direct
+                elide: Text.ElideRight
+                font: Kirigami.Theme.smallFont
+                opacity: 0.7
+                Layout.fillWidth: true
+            }
         }
     }
 }

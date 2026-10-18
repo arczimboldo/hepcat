@@ -5,6 +5,7 @@ fn main() {
         "qml/Main.qml",
         "qml/Strip.qml",
         "qml/Section.qml",
+        "qml/Fader.qml",
         "qml/EffectsDialog.qml",
     ]))
     .qt_module("Gui")

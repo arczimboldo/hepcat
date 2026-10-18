@@ -87,6 +87,21 @@ pub struct MixerRust {
 
 impl cxx_qt::Initialize for qobject::Mixer {
     fn initialize(mut self: Pin<&mut Self>) {
+        // Development aid: show a saved state (from HEPCAT_DEBUG output)
+        // without touching PipeWire, e.g. for screenshots.
+        if let Ok(path) = std::env::var("HEPCAT_FAKE_STATE") {
+            match std::fs::read_to_string(&path) {
+                Ok(json) => {
+                    // May carry meter levels too: { "levels": { "<id>": 0.7 } }.
+                    if let Some(levels) = serde_json::from_str::<serde_json::Value>(&json).ok().and_then(|v| v.get("levels").cloned()) {
+                        self.as_mut().set_levels_json(QString::from(&levels.to_string()));
+                    }
+                    self.as_mut().set_state_json(QString::from(json.trim()));
+                }
+                Err(e) => eprintln!("hepcat: cannot read {path}: {e}"),
+            }
+            return;
+        }
         let qt_thread = self.qt_thread();
         let sender = engine::spawn(move |event| {
             // Fails only if the Mixer is already gone, in which case nobody is listening.

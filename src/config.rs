@@ -120,6 +120,8 @@ pub struct Effects {
     /// Automatic gain control: keeps speech at a steady level.
     pub auto_gain: bool,
     pub noise: NoiseMode,
+    /// How hard `noise` works, 1 (light) to 4 (maximum); 3 is the default.
+    pub noise_strength: u8,
     /// Remove what the speakers play (other than this strip itself) from the signal.
     pub echo: bool,
     pub gate: bool,
@@ -144,6 +146,7 @@ impl Default for Effects {
             gain_db: 0.0,
             auto_gain: false,
             noise: NoiseMode::Off,
+            noise_strength: 3,
             echo: false,
             gate: false,
             gate_db: -50.0,
@@ -170,6 +173,7 @@ impl Effects {
         self.compressor = clamp(self.compressor, 0.0, 1.0);
         self.pitch = clamp(self.pitch, -12.0, 12.0);
         self.voice_mix = clamp(self.voice_mix, 0.0, 1.0);
+        self.noise_strength = self.noise_strength.clamp(1, 4);
         self
     }
 }

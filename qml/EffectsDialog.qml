@@ -34,7 +34,7 @@ Kirigami.Dialog {
     }
 
     function resetEffects() {
-        settings = { enabled: settings.enabled, gain_db: 0, auto_gain: false, noise: "off", echo: false,
+        settings = { enabled: settings.enabled, gain_db: 0, auto_gain: false, noise: "off", noise_strength: 3, echo: false,
                      gate: false, gate_db: -50, bass_db: 0, presence_db: 0, treble_db: 0, compressor: 0,
                      pitch: 0, voice: "none", voice_mix: 1 }
         mixer.setFx(dialog.key, JSON.stringify(settings))
@@ -147,6 +147,25 @@ Kirigami.Dialog {
                 opacity: 0.7
                 font: Kirigami.Theme.smallFont
                 Layout.maximumWidth: Kirigami.Units.gridUnit * 16
+            }
+            ValueSlider {
+                id: strengthSlider
+                Kirigami.FormData.label: "Strength:"
+                visible: (dialog.settings.noise || "off") !== "off"
+                enabled: dialog.on
+                key: "noise_strength"
+                from: 1
+                to: 4
+                fallback: 3
+                format: v => ["Light", "Medium", "Strong", "Maximum"][Math.round(v) - 1]
+                QQC2.ToolTip.text: dialog.settings.noise === "voice"
+                    ? "Light and Medium leave some background in, so speech sounds more natural. "
+                      + "Strong removes all the noise it can. Maximum also mutes everything while you aren't talking."
+                    : "How far steady noise is pushed down: from about 6 dB (Light) to about 21 dB (Maximum). "
+                      + "Stronger settings can make speech sound thinner."
+                QQC2.ToolTip.visible: strengthHover.hovered
+                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                HoverHandler { id: strengthHover }
             }
 
             QQC2.CheckBox {

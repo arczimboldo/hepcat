@@ -26,10 +26,17 @@ pub const MAX_CHANNELS: usize = 2;
 /// Echo reference older than this is useless to the canceller.
 const MAX_REFERENCE: usize = FRAME * 10;
 
+/// Voice isolation at the strongest setting mutes the signal once RNNoise
+/// has heard no speech for this many frames.
+const VOICE_HOLD: u32 = 25;
+
 /// Per-channel state of the blocks that work on each channel separately.
 #[derive(Default)]
 struct Lane {
     denoise: Option<Box<DenoiseState<'static>>>,
+    /// The previous input frame: RNNoise's output lags its input by one frame,
+    /// so this is the dry signal that lines up with it.
+    dry: Option<Box<[f32; FRAME]>>,
     eq: [Biquad; 3],
     pitch: PitchShifter,
     voice: VoiceFx,
@@ -52,6 +59,9 @@ pub struct Processor {
     limiter: Limiter,
     eq_settings: [f32; 3],
     lanes: Vec<Lane>,
+    /// Gain and hold counter of the speech gate used by maximum voice isolation.
+    voice_gate: f32,
+    voice_hold: u32,
     peak: f32,
 }
 
@@ -73,6 +83,8 @@ impl Processor {
             limiter: Limiter::default(),
             eq_settings: [0.0; 3],
             lanes: (0..channels).map(|_| Lane::default()).collect(),
+            voice_gate: 1.0,
+            voice_hold: VOICE_HOLD,
             peak: 0.0,
         };
         p.set_effects(fx);
@@ -99,7 +111,8 @@ impl Processor {
 
         let wanted = (fx.echo || fx.noise == NoiseMode::Standard || fx.auto_gain).then_some(ApmConfig {
             echo: fx.echo,
-            noise: (fx.noise == NoiseMode::Standard).then_some(2),
+            // WebRTC's levels run from 0 (low, about 6 dB) to 3 (very high, about 21 dB).
+            noise: (fx.noise == NoiseMode::Standard).then_some(fx.noise_strength.clamp(1, 4) - 1),
             auto_gain: fx.auto_gain,
         });
         match (wanted, &mut self.apm) {
@@ -197,6 +210,45 @@ impl Processor {
         std::mem::take(&mut self.peak)
     }
 
+    /// RNNoise on every channel. Below full strength some of the dry signal
+    /// is mixed back in, which caps how far noise is pushed down; at maximum,
+    /// everything is muted while no channel holds speech.
+    fn isolate_voice(&mut self, planes: &mut [[f32; FRAME]]) {
+        let strength = self.fx.noise_strength.clamp(1, 4);
+        // How much dry signal stays: -10 dB (light), -20 dB (medium), none.
+        let dry_gain = match strength {
+            1 => 0.316,
+            2 => 0.1,
+            _ => 0.0,
+        };
+        let mut vad = 0.0f32;
+        for (plane, lane) in planes.iter_mut().zip(&mut self.lanes) {
+            let Some(denoise) = &mut lane.denoise else { continue };
+            // RNNoise expects 16-bit sample values.
+            let input = plane.map(|s| s * 32768.0);
+            let mut out = [0.0; FRAME];
+            vad = vad.max(denoise.process_frame(&mut out, &input));
+            let dry = lane.dry.get_or_insert_with(|| Box::new([0.0; FRAME]));
+            for ((s, wet), d) in plane.iter_mut().zip(out).zip(dry.iter()) {
+                *s = wet / 32768.0 + d * dry_gain;
+            }
+            dry.copy_from_slice(&input.map(|s| s / 32768.0));
+        }
+        if strength < 4 {
+            self.voice_gate = 1.0;
+            return;
+        }
+        self.voice_hold = if vad >= 0.5 { VOICE_HOLD } else { self.voice_hold.saturating_sub(1) };
+        let target = if self.voice_hold > 0 { 1.0 } else { 0.0 };
+        // Fade over the frame so the gate never clicks.
+        let start = self.voice_gate;
+        for (i, k) in (1..=FRAME).map(|i| (i, i as f32 / FRAME as f32)) {
+            let g = start + (target - start) * k;
+            planes.iter_mut().for_each(|p| p[i - 1] *= g);
+        }
+        self.voice_gate = target;
+    }
+
     fn process_frame(&mut self, planes: &mut [[f32; FRAME]]) {
         let fx = self.fx;
         for i in 0..FRAME {
@@ -219,14 +271,8 @@ impl Processor {
             apm.capture(planes);
         }
 
-        for (plane, lane) in planes.iter_mut().zip(&mut self.lanes) {
-            if let Some(denoise) = &mut lane.denoise {
-                // RNNoise expects 16-bit sample values.
-                let input = plane.map(|s| s * 32768.0);
-                let mut out = [0.0; FRAME];
-                denoise.process_frame(&mut out, &input);
-                *plane = out.map(|s| s / 32768.0);
-            }
+        if fx.noise == NoiseMode::Voice {
+            self.isolate_voice(planes);
         }
 
         let eq_on = self.eq_settings.iter().any(|&db| db != 0.0);
@@ -347,6 +393,36 @@ mod tests {
         let out = run(&fx, &input);
         let ratio = rms(&out[RATE as usize..]) / rms(&input);
         assert!(ratio < 0.2, "noise left: {ratio}");
+    }
+
+    #[test]
+    fn noise_strength_sets_how_much_noise_is_left() {
+        let mut lp = 0.0;
+        let input: Vec<f32> = noise(RATE as usize * 3, 0.1)
+            .into_iter()
+            .map(|x| {
+                lp = lp * 0.9 + x * 0.1;
+                lp * 3.0
+            })
+            .collect();
+        let left = |noise, noise_strength| {
+            let out = run(&Effects { noise, noise_strength, ..Effects::default() }, &input);
+            rms(&out[RATE as usize * 2..]) / rms(&input)
+        };
+        for mode in [NoiseMode::Standard, NoiseMode::Voice] {
+            let levels: Vec<f32> = (1..=4).map(|s| left(mode, s)).collect();
+            assert!(levels.windows(2).all(|w| w[0] >= w[1]), "{mode:?}: {levels:?}");
+            assert!(levels[0] > levels[3] * 1.5, "{mode:?}: {levels:?}");
+        }
+        // Maximum voice isolation mutes whatever RNNoise hears no speech in,
+        // such as mains hum, entirely.
+        let hum: Vec<f32> = (0..RATE as usize * 2)
+            .map(|i| (1..6).map(|h| 0.05 / h as f32 * (TAU * 50.0 * h as f32 * i as f32 / RATE as f32).sin()).sum())
+            .collect();
+        let fx = |noise_strength| Effects { noise: NoiseMode::Voice, noise_strength, ..Effects::default() };
+        let strong = rms(&run(&fx(3), &hum)[RATE as usize..]);
+        let max = rms(&run(&fx(4), &hum)[RATE as usize..]);
+        assert!(max < 1e-6 && strong > 1e-4, "hum left: {max} (strong: {strong})");
     }
 
     #[test]

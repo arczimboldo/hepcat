@@ -65,7 +65,10 @@ Instead of a node graph, Hepcat shows mixer strips:
   - **Noise suppression.** *Standard* removes steady noise (fans, hum, hiss)
     and lets every other sound through, claps and music included. *Voice
     isolation* uses RNNoise, a neural network, and keeps only speech, much
-    like Discord's Krisp.
+    like Discord's Krisp. A strength slider runs from *Light* to *Maximum*.
+    For voice isolation, *Light* and *Medium* leave some background in so
+    speech sounds more natural, and *Maximum* also mutes everything while
+    nobody speaks.
   - **Echo cancellation.** Removes what your speakers play from an input, or
     from an app or bus that carries a microphone (a phone mirrored with
     scrcpy, for example). The strip's own sound is never removed, even when
@@ -77,6 +80,22 @@ Instead of a node graph, Hepcat shows mixer strips:
     megaphone, underwater, echo and hall effects, with a wet/dry mix.
 
 ![The effects dialog for scrcpy](screenshots/effects.png)
+
+The **View** menu in the top right changes the layout:
+
+- **One row** (scroll sideways) or **wrap into rows** (scroll down), so
+  many strips fit without wasting height.
+- **Fader strips** or **compact tiles**: small horizontal tiles with a
+  slider, which fill the window in columns or a grid.
+- Which sections are shown, and **Reset Layout**.
+
+Drag the right edge of a strip to make that section's strips wider or
+narrower, or the bottom edge in the wrapped layout to make them taller.
+Double-click the edge to reset. The ⋯ button on a strip or section (or a
+right-click) hides it or moves it left or right. A **Hidden** button in the
+toolbar, and an "N hidden" note next to the section title, show that
+something is hidden and bring it back. Hidden apps stay hidden when they
+restart. The layout is saved in `~/.config/hepcat/layout.conf`.
 
 Closing the window keeps Hepcat running in the **system tray**, so rules keep
 being applied (for example when headphones reconnect). Use "Start at Login" in
@@ -165,6 +184,7 @@ HEPCAT_DEBUG=1 cargo run        # print every state snapshot
 echo "toggle app:Firefox main" | cargo run -- --headless   # no window
 HEPCAT_NO_METERS=1 cargo run    # disable level meters
 QT_QPA_PLATFORM=offscreen HEPCAT_SCREENSHOT=shot.png cargo run   # render UI to a file
+HEPCAT_FAKE_STATE=state.json cargo run   # show a saved state, no PipeWire
 ```
 
 `--headless` reads one command per line: `toggle <key> <bus>`,
@@ -190,7 +210,7 @@ MIT, see [LICENSE](LICENSE).
 
 ## Roadmap
 
-- Rename buses, reorder strips
+- Rename buses
 - Show saved routes for apps that are not running
 - Effects on hardware outputs
 - Optional filtered graph view for advanced patching
